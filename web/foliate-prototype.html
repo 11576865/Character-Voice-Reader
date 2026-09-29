@@ -1,0 +1,22 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>CVS EPUB 排版组件验证</title>
+  <style>
+    body { font: 16px system-ui, sans-serif; margin: 24px; }
+    foliate-view { display: block; height: 65vh; border: 1px solid #999; margin-top: 16px; }
+    pre { white-space: pre-wrap; }
+  </style>
+</head>
+<body>
+  <h1>EPUB 排版与段落映射验证</h1>
+  <p>此页面使用已固定版本的 foliate-js 显示 EPUB，并与 CVS 当前文本解析结果比较。段落映射通过前，正式 Reader 保留现有显示方式。</p>
+  <input id="file" type="file" accept=".epub,application/epub+zip">
+  <button id="previous">上一页</button><button id="next">下一页</button>
+  <div id="status" role="status">请选择 EPUB。</div>
+  <pre id="differences"></pre>
+  <foliate-view id="book"></foliate-view>
+  <script type="module" src="/reader-assets/js/foliate_prototype.js"></script>
+</body>
+</html>

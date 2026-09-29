@@ -1,0 +1,245 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <link rel="icon" type="image/svg+xml" href="/reader-assets/favicon.svg?v=1">
+  <link rel="stylesheet" href="/reader-assets/reader.css?v=2">
+  <title>Character Voice Reader</title>
+</head>
+<body data-theme="auto">
+  <div class="app-shell">
+    <header class="topbar">
+      <div>
+        <div class="eyebrow">CHARACTER VOICE READER</div>
+        <h1>Character Voice Reader</h1>
+        <p>导入 TXT / EPUB 或直接粘贴文本，以角色语音连续朗读。阅读位置与本机偏好保存在当前浏览器。</p>
+      </div>
+      <a class="quiet-link" href="/epub-prototype">EPUB 组件验证</a>
+    </header>
+
+    <section class="panel" aria-labelledby="sourceTitle">
+      <div class="section-head">
+        <div class="section-title"><span class="step">01</span><h2 id="sourceTitle">阅读来源</h2></div>
+        <p class="section-note">选择一种来源即可；重新导入会切换当前文档。</p>
+      </div>
+      <div class="source-grid">
+        <div class="field">
+          <label for="txtFile">TXT 文件</label>
+          <input id="txtFile" type="file" accept=".txt,text/plain">
+        </div>
+        <div class="field">
+          <label for="epubFile">EPUB 文件</label>
+          <input id="epubFile" type="file" accept=".epub,application/epub+zip">
+        </div>
+        <div class="field">
+          <label for="documentFile">文档配音</label>
+          <input id="documentFile" type="file" accept=".md,.docx,.txt">
+        </div>
+      </div>
+      <details id="manualPanel" class="compact-details">
+        <summary>手动粘贴文本</summary>
+        <div class="manual-body">
+          <label for="text">文本内容</label>
+          <textarea id="text" placeholder="在这里粘贴文本；空行用于分段。"></textarea>
+          <div><button id="useManual" type="button">使用粘贴文本</button></div>
+        </div>
+      </details>
+    </section>
+
+    <section class="panel" aria-labelledby="voiceTitle">
+      <div class="section-head">
+        <div class="section-title"><span class="step">02</span><h2 id="voiceTitle">语音设置</h2></div>
+        <p class="section-note">角色、模型与参考语音会固定在当前播放会话中。</p>
+      </div>
+      <div class="voice-grid">
+        <div class="field">
+          <label for="voice">角色</label>
+          <select id="voice" disabled></select>
+        </div>
+        <div class="field">
+          <label for="modelId">模型</label>
+          <select id="modelId" disabled></select>
+        </div>
+        <div class="field">
+          <label for="referenceId">参考语音</label>
+          <select id="referenceId" disabled></select>
+        </div>
+        <div class="field compact">
+          <label for="speed">速度</label>
+          <input id="speed" type="number" min="0.1" step="0.1" value="1.0">
+        </div>
+        <div class="field wide-action">
+          <label>&nbsp;</label>
+          <button id="previewReference" type="button">试听参考</button>
+        </div>
+      </div>
+    </section>
+
+    <div id="bookInfo" class="meta-strip" aria-label="书籍信息">
+      <span id="source">文本来源：未加载</span>
+      <span id="bookTitle">书名：—</span>
+      <span id="bookAuthor">作者：—</span>
+      <span id="chapterCount">章节：—</span>
+    </div>
+
+    <section id="resumePrompt" hidden aria-label="恢复阅读进度">
+      <div id="resumeText">检测到上次阅读位置。</div>
+      <button id="resumeLast" class="primary" type="button">继续阅读</button>
+      <button id="restartBook" type="button">从头开始</button>
+    </section>
+
+    <section class="playback-bar" aria-label="播放控制">
+      <div class="playback-status">
+        <div id="status" role="status" aria-live="polite">正在读取角色列表……</div>
+        <div id="currentChapter">当前章节：—</div>
+        <div id="position">尚未开始阅读</div>
+      </div>
+      <div class="controls playback-controls">
+        <button id="previousChapter" type="button" disabled>上一章</button>
+        <button id="previousSegment" type="button" disabled>上一段</button>
+        <button id="start" class="primary" type="button" disabled>开始</button>
+        <button id="pause" type="button" disabled>暂停</button>
+        <button id="stop" type="button" disabled>停止</button>
+        <button id="nextSegment" type="button" disabled>下一段</button>
+        <button id="nextChapter" type="button" disabled>下一章</button>
+        <button id="regenerateParagraph" type="button" disabled>重生成当前段</button>
+        <button id="previewSelection" type="button" disabled>试听所选文字</button>
+      </div>
+    </section>
+
+    <div id="storageNotice" hidden>此浏览器无法使用 localStorage，本次阅读位置不会在刷新后保留。</div>
+
+    <div class="reader-layout">
+      <aside class="chapter-rail">
+        <details id="chaptersPanel" open>
+          <summary>章节</summary>
+          <nav id="chapterList" aria-label="章节导航"></nav>
+        </details>
+      </aside>
+
+      <main id="readingPane" aria-label="正文阅读区域">
+        <div id="documentBody">请选择 TXT / EPUB，或使用粘贴文本。</div>
+      </main>
+    </div>
+
+    <section class="tools-grid" aria-label="阅读与生成工具">
+      <details class="panel tool-panel">
+        <summary>阅读工具</summary>
+        <div class="tool-body">
+          <div class="controls">
+            <button id="addBookmark" type="button">添加书签</button>
+            <div class="field">
+              <label for="bookmarkList">书签</label>
+              <select id="bookmarkList"></select>
+            </div>
+            <button id="goBookmark" type="button">跳转</button>
+            <div class="field">
+              <label for="searchText">搜索</label>
+              <input id="searchText" type="search" placeholder="搜索书内文字">
+            </div>
+            <button id="searchNext" type="button">下一处</button>
+            <div class="field">
+              <label for="fontSize">字号</label>
+              <input id="fontSize" type="range" min="14" max="30" value="18">
+            </div>
+            <div class="field">
+              <label for="theme">主题</label>
+              <select id="theme">
+                <option value="auto">系统</option>
+                <option value="sepia">护眼</option>
+                <option value="dark">深色</option>
+              </select>
+            </div>
+            <div class="field">
+              <label for="sleepMinutes">睡眠定时</label>
+              <select id="sleepMinutes">
+                <option value="0">关闭</option>
+                <option value="10">10 分钟</option>
+                <option value="20">20 分钟</option>
+                <option value="30">30 分钟</option>
+                <option value="60">60 分钟</option>
+              </select>
+            </div>
+          </div>
+        </div>
+      </details>
+
+      <details class="panel tool-panel">
+        <summary>段落角色</summary>
+        <div class="tool-body">
+          <strong id="selectedParagraphLabel">点击正文段落以指定角色</strong>
+          <div class="controls">
+            <div class="field">
+              <label for="paragraphVoice">段落角色</label>
+              <select id="paragraphVoice"></select>
+            </div>
+            <div class="field">
+              <label for="paragraphReference">参考语音</label>
+              <select id="paragraphReference"></select>
+            </div>
+            <button id="applyParagraphVoice" type="button" disabled>保存段落标注</button>
+          </div>
+        </div>
+      </details>
+
+      <details class="panel tool-panel">
+        <summary>发音纠正</summary>
+        <div class="tool-body">
+          <p>正文保持原样；生成语音时替换指定词语。修改后需重新生成受影响的段落或整书。</p>
+          <div class="controls">
+            <div class="field"><label for="pronunciationFrom">原词</label><input id="pronunciationFrom" placeholder="原词"></div>
+            <div class="field"><label for="pronunciationTo">替换读法</label><input id="pronunciationTo" placeholder="朗读时替换为"></div>
+            <button id="addPronunciation" type="button">添加或更新</button>
+          </div>
+          <div id="pronunciationList"></div>
+        </div>
+      </details>
+
+      <details class="panel tool-panel">
+        <summary>段落音频版本</summary>
+        <div class="tool-body">
+          <div class="version-row">
+            <select id="paragraphVersions" aria-label="当前段落已保存的版本" disabled></select>
+            <button id="selectVersion" type="button" disabled>选用并播放</button>
+            <button id="deleteVersion" type="button" disabled>删除</button>
+          </div>
+        </div>
+      </details>
+
+      <details id="libraryPanel" class="panel tool-panel">
+        <summary>我的书库与整书生成</summary>
+        <div class="tool-body">
+          <p>私人书库令牌保存在电脑上的 <code>data/admin-token.txt</code>；也可通过 <code>CVR_ADMIN_TOKEN</code> 指定。登录后网页使用受保护会话。</p>
+          <div class="controls">
+            <div class="field"><label for="libraryToken">书库令牌</label><input id="libraryToken" type="password" autocomplete="off"></div>
+            <button id="loginLibrary" type="button">登录书库</button>
+            <button id="loadLibrary" type="button">刷新书库</button>
+          </div>
+          <div class="controls library-actions">
+            <button id="saveBook" type="button">保存当前书籍</button>
+            <button id="generateBook" class="primary" type="button">整本书一键生成</button>
+            <label><input id="continuousEmotion" type="checkbox"> 试用长篇情绪连续规划</label>
+            <button id="cancelGeneration" type="button">取消生成</button>
+          </div>
+          <div class="controls library-actions">
+            <button id="downloadBook" type="button">下载整本书</button>
+            <button id="exportEpub" type="button">导出同步 EPUB</button>
+            <button id="exportWav" type="button">导出整篇 WAV</button>
+            <button id="suggestSpeakers" type="button">查找明确的角色标记</button>
+          </div>
+          <div id="jobStatus" role="status"></div>
+          <div id="speakerSuggestions"></div>
+          <nav id="libraryBooks" aria-label="本机书库"></nav>
+          <h3 class="subheading">本设备离线书籍</h3>
+          <nav id="offlineBooks" aria-label="离线书库"></nav>
+        </div>
+      </details>
+    </section>
+
+    <audio id="audio" hidden></audio>
+  </div>
+
+  <script type="module" src="/reader-assets/js/reader.js"></script>
+</body>
+</html>

@@ -1,0 +1,211 @@
+<!doctype html>
+<html lang="en">
+<meta charset="utf-8">
+<title>Reader state tests</title>
+<pre id="result">RUNNING</pre>
+<script type="module">
+import { ProgressStore, PROGRESS_KEY_PREFIX, documentIdForFile } from "../web/js/progress.js";
+import { ReaderNavigation, chapterStart, chapterPosition } from "../web/js/navigation.js";
+import { ReaderQueue } from "../web/js/queue.js";
+import { AudioPlayer } from "../web/js/player.js";
+import { documentFromTxt } from "../web/js/sources.js";
+import { segmentDocument } from "../web/js/segmenter.js";
+
+const output = document.getElementById("result");
+let passed = 0;
+function assert(value, message) {
+  if (!value) throw new Error(message);
+  passed += 1;
+}
+function deferred() {
+  let resolve;
+  const promise = new Promise(done => { resolve = done; });
+  return { promise, resolve };
+}
+function storage() {
+  const map = new Map();
+  return {
+    map,
+    getItem(key) { return map.has(key) ? map.get(key) : null; },
+    setItem(key, value) { map.set(key, value); },
+    removeItem(key) { map.delete(key); }
+  };
+}
+
+try {
+  const source = new TextEncoder().encode("same book");
+  const equal = new TextEncoder().encode("same book");
+  const different = new TextEncoder().encode("changed book");
+  const id = documentIdForFile(source.buffer, "txt");
+  assert(id === documentIdForFile(equal.buffer, "txt"), "document ID stable for equal bytes");
+  assert(id !== documentIdForFile(different.buffer, "txt"), "content change gives new ID");
+  assert(id !== documentIdForFile(source.buffer, "epub"), "source type namespaces ID");
+
+  const epubDocument = { title: "A Book", chapters: [
+    { title: "One", paragraphs: ["First. Second."] },
+    { title: "Empty", paragraphs: [] },
+    { title: "Three", paragraphs: ["Third. Fourth."] }
+  ] };
+  const segments = segmentDocument(epubDocument, { maxChars: 20 });
+  assert(chapterStart(segments, 1) === -1, "empty chapter has no segment");
+  assert(chapterStart(segments, 2) >= 0, "later EPUB chapter has a start");
+  const chapterThree = chapterStart(segments, 2);
+  assert(chapterPosition(segments, chapterThree).index === 1, "chapter position starts at one");
+
+  const local = storage();
+  const store = new ProgressStore(local);
+  assert(store.available, "working localStorage is detected");
+  assert(store.save({ documentId: id, title: epubDocument.title, chapterIndex: 2,
+    segmentIndex: chapterThree, audioTime: 2.5 }), "progress save succeeds");
+  const loaded = store.load(id, epubDocument, segments);
+  assert(loaded.chapterIndex === 2 && loaded.segmentIndex === chapterThree && loaded.audioTime === 2.5,
+    "progress restores chapter, segment and audio time");
+  assert(loaded.updatedAt.length > 0, "progress timestamp saved");
+  local.setItem(PROGRESS_KEY_PREFIX + id, "{broken");
+  assert(store.load(id, epubDocument, segments) === null, "corrupt JSON falls back safely");
+  local.setItem(PROGRESS_KEY_PREFIX + id, JSON.stringify({ version: 0, documentId: id,
+    chapterIndex: 2, segmentIndex: chapterThree }));
+  assert(store.load(id, epubDocument, segments) === null, "old progress version ignored");
+  local.setItem(PROGRESS_KEY_PREFIX + id, JSON.stringify({ version: 1, documentId: id,
+    chapterIndex: 2, segmentIndex: 999, audioTime: 12 }));
+  const clamped = store.load(id, epubDocument, segments);
+  assert(clamped.segmentIndex === chapterThree && clamped.audioTime === 0,
+    "out-of-range segment falls back to chapter start without stale audio time");
+  local.setItem(PROGRESS_KEY_PREFIX + id, JSON.stringify({ version: 1, documentId: id,
+    chapterIndex: 1, segmentIndex: 999, audioTime: 12 }));
+  assert(store.load(id, epubDocument, segments).segmentIndex === 0,
+    "empty chapter progress falls back to first readable segment");
+  local.setItem(PROGRESS_KEY_PREFIX + id, JSON.stringify({ version: 1, documentId: id,
+    chapterIndex: 999, segmentIndex: 999, audioTime: 12 }));
+  assert(store.load(id, epubDocument, segments).segmentIndex === 0,
+    "missing chapter progress falls back safely");
+  const blocked = new ProgressStore({ setItem() { throw new Error("blocked"); } });
+  assert(!blocked.available, "blocked localStorage is detected");
+  assert(!blocked.save({ documentId: id, title: "A", chapterIndex: 0, segmentIndex: 0, audioTime: 0 }),
+    "blocked storage does not throw");
+  assert(blocked.load(id, epubDocument, segments)?.segmentIndex === 0,
+    "session memory fallback still works");
+
+  const txt = documentFromTxt("Plain first.\n\nPlain second.", "Plain TXT");
+  assert(txt.chapters.length === 1, "TXT without headings remains one chapter");
+  const txtSegments = segmentDocument(txt);
+  assert(chapterStart(txtSegments, 0) === 0, "TXT single chapter navigable");
+  store.save({ documentId: id, title: txt.title, chapterIndex: 0, segmentIndex: 0, audioTime: 1.25 });
+  assert(store.load(id, txt, txtSegments).audioTime === 1.25,
+    "TXT single chapter progress restores audio time");
+
+  const requests = [];
+  const player = {
+    plays: [], stops: 0,
+    async play(blob, time) { this.plays.push({ blob, time }); },
+    pause() {}, async resume() {}, stop() { this.stops += 1; }
+  };
+  const queue = new ReaderQueue({
+    player,
+    requestAudio({ segment, signal }) {
+      const task = deferred();
+      requests.push({ segment, signal, task });
+      return task.promise;
+    }
+  });
+  const jumps = [];
+  const nav = new ReaderNavigation({
+    document: epubDocument, segments, queue,
+    getPlaybackOptions: () => ({ voice: "march-7th", speed: 1 }),
+    onJump: position => jumps.push(position)
+  });
+  const initial = nav.jumpToChapter(0);
+  assert(queue.state === "generating" && queue.index === 0, "chapter jump begins at first segment");
+  requests[0].task.resolve(new Blob(["first"]));
+  await initial;
+  nav.sync(queue.snapshot);
+  assert(queue.state === "playing" && requests.length === 2, "single prefetch starts while playing");
+  assert(await nav.previousSegment() === false, "previous segment rejects lower bound");
+  assert(await nav.previousChapter() === false, "previous chapter rejects lower bound");
+
+  requests[1].task.resolve(new Blob(["prefetched"]));
+  await queue.prefetchPromise;
+  assert(queue.nextAudio !== null, "one next audio retained");
+  const changed = nav.jumpToChapter(2);
+  assert(queue.index === chapterThree && queue.state === "generating", "EPUB chapter jump changes queue index");
+  assert(queue.nextAudio === null && queue.prefetchPromise === null && player.stops >= 2,
+    "chapter jump stops player and clears prefetch");
+  assert(jumps.at(-1).index === chapterThree, "chapter jump reports new progress target");
+  const pending = requests.at(-1);
+  const rapid = nav.previousSegment();
+  assert(pending.signal.aborted, "rapid jump aborts in-flight generation");
+  assert(queue.index === chapterThree - 1, "segment jump chooses prior segment");
+  pending.task.resolve(new Blob(["stale"]));
+  await changed;
+  assert(queue.index === chapterThree - 1, "stale response cannot overwrite later jump");
+  requests.at(-1).task.resolve(new Blob(["new"]));
+  await rapid;
+  assert(queue.state === "playing" && player.plays.at(-1).blob.size === 3,
+    "latest jump plays only latest response");
+  assert(await nav.jumpToSegment(-1) === false, "negative segment index rejected");
+  assert(await nav.jumpToSegment(segments.length) === false, "upper segment bound rejected");
+
+  const generatingRequest = requests.at(-1);
+  const lastJump = nav.jumpToSegment(segments.length - 1, 4.2);
+  assert(generatingRequest.signal.aborted, "jump while generating cancels previous prefetch");
+  requests.at(-1).task.resolve(new Blob(["last"]));
+  await lastJump;
+  assert(player.plays.at(-1).time === 4.2, "audio seek time reaches player");
+  nav.sync(queue.snapshot);
+  assert(await nav.nextSegment() === false, "next segment rejects upper bound");
+  assert(await nav.nextChapter() === false, "next chapter rejects upper bound");
+  queue.pause();
+  const fromPause = nav.jumpToChapter(0);
+  assert(queue.state === "generating" && queue.index === 0,
+    "chapter jump from pause replaces paused audio");
+  requests.at(-1).task.resolve(new Blob(["restart"]));
+  await fromPause;
+  assert(queue.state === "playing" && player.plays.at(-1).blob.size === 7,
+    "paused chapter jump plays only the target audio");
+  queue.stop();
+  assert(queue.nextAudio === null && queue.snapshot.total === 0 && queue.state === "stopped",
+    "stop clears one-audio prefetch and queue");
+
+  const listeners = new Map();
+  const audio = {
+    currentTime: 0, duration: 10, readyState: 0, pauses: 0, loads: 0,
+    addEventListener(type, listener) {
+      if (!listeners.has(type)) listeners.set(type, new Set());
+      listeners.get(type).add(listener);
+    },
+    removeEventListener(type, listener) { listeners.get(type)?.delete(listener); },
+    emit(type) { for (const listener of [...(listeners.get(type) || [])]) listener(); },
+    async play() {},
+    pause() { this.pauses += 1; },
+    removeAttribute(name) { delete this[name]; },
+    load() { this.loads += 1; }
+  };
+  const originalCreate = URL.createObjectURL;
+  const originalRevoke = URL.revokeObjectURL;
+  const revoked = [];
+  let created = 0;
+  try {
+    URL.createObjectURL = () => `blob:reader-test-${++created}`;
+    URL.revokeObjectURL = url => revoked.push(url);
+    const realPlayer = new AudioPlayer(audio);
+    await realPlayer.play(new Blob(["wav"]), 4.2);
+    assert(audio.src === "blob:reader-test-1", "player holds only current Object URL");
+    audio.readyState = 1;
+    audio.emit("loadedmetadata");
+    assert(audio.currentTime === 4.2, "player restores saved audio time");
+    await realPlayer.play(new Blob(["next"]));
+    assert(revoked.includes("blob:reader-test-1"), "new playback releases old Object URL");
+    realPlayer.stop();
+    assert(revoked.includes("blob:reader-test-2") && audio.src === undefined,
+      "stop releases URL and removes source");
+  } finally {
+    URL.createObjectURL = originalCreate;
+    URL.revokeObjectURL = originalRevoke;
+  }
+
+  output.textContent = `PASS: ${passed} assertions`;
+} catch (error) {
+  output.textContent = `FAIL: ${error.stack || error}`;
+}
+</script>
+</html>
