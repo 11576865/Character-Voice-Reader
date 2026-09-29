@@ -7,6 +7,7 @@ import { ProgressStore, documentIdForFile } from "./progress.js";
 import { ReaderNavigation, chapterStart, chapterPosition } from "./navigation.js";
 import { VariantStore } from "./variants.js";
 import { OfflineLibrary } from "./offline.js";
+import { fetchJson, fetchSpeech, readError } from "./api.js";
 
 const element = id => document.getElementById(id);
 const ui = {
@@ -44,7 +45,9 @@ const ui = {
   addBookmark: element("addBookmark"), bookmarkList: element("bookmarkList"),
   goBookmark: element("goBookmark"), searchText: element("searchText"),
   searchNext: element("searchNext"), fontSize: element("fontSize"),
-  theme: element("theme"), sleepMinutes: element("sleepMinutes")
+  theme: element("theme"), sleepMinutes: element("sleepMinutes"),
+  serviceStrip: element("serviceStrip"), serviceStatus: element("serviceStatus"),
+  engineStatus: element("engineStatus"), retryService: element("retryService")
 };
 
 const progressStore = new ProgressStore();
@@ -88,6 +91,7 @@ let bookVersions = {};
 let offlineAudioVersion = null;
 let offlineAnnotationsSignature = "";
 let sleepTimer = null;
+let serviceState = { status: "checking", engines: [] };
 
 function bookmarkKey() { return `cvs.bookmarks.v1:${documentId || "manual"}`; }
 
@@ -232,28 +236,22 @@ async function updatePronunciation(source, replacement) {
 }
 
 async function fetchFreshAudio({ segment, voice, modelId, referenceId, speed, signal }) {
-  const response = await fetch("/v1/audio/speech", {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    signal,
-    body: JSON.stringify({
-      voice,
-      model_id: modelId || null,
-      reference_id: referenceId || null,
-      input: spokenText(segment.text),
-      response_format: "wav",
-      speed
-    })
-  });
-  if (!response.ok) throw new Error((await response.text()) || `HTTP ${response.status}`);
-  const contentType = response.headers.get("content-type") || "";
-  if (!contentType.startsWith("audio/wav") && !contentType.startsWith("audio/x-wav")) {
-    throw new Error(`返回了非 WAV 音频：${contentType}`);
-  }
+  const response = await fetchSpeech({
+    voice,
+    model_id: modelId || null,
+    reference_id: referenceId || null,
+    input: spokenText(segment.text),
+    response_format: "wav",
+    speed
+  }, { signal });
   const blob = await response.blob();
   selectedReferences.set(segment.index, {
     id: response.headers.get("X-Selected-Reference"),
-    reason: response.headers.get("X-Reference-Reason")
+    reason: response.headers.get("X-Reference-Reason"),
+    engine: response.headers.get("X-CVS-Engine"),
+    model: response.headers.get("X-CVS-Model"),
+    generationRevision: response.headers.get("X-CVS-Generation-Revision"),
+    requestId: response.headers.get("X-CVS-Request-ID")
   });
   return blob;
 }
@@ -768,12 +766,10 @@ async function previewSelection() {
   queue.stop();
   try {
     const options = playbackOptions();
-    const response = await fetch("/v1/audio/speech", {
-      method: "POST", headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ voice: options.voice, model_id: options.modelId,
-        reference_id: options.referenceId, input: spokenText(text), speed: options.speed })
+    const response = await fetchSpeech({
+      voice: options.voice, model_id: options.modelId,
+      reference_id: options.referenceId, input: spokenText(text), speed: options.speed
     });
-    if (!response.ok) throw new Error(`HTTP ${response.status}`);
     const url = URL.createObjectURL(await response.blob());
     previewAudio = new Audio(url);
     previewAudio.onended = () => URL.revokeObjectURL(url);
@@ -892,7 +888,7 @@ function syncCharacterAssets() {
     ui.modelId,
     voice.models,
     voice.default_model,
-    item => [item.name || item.id, item.version].filter(Boolean).join(" · ")
+    item => [item.name || item.id, item.engine, item.version].filter(Boolean).join(" · ")
   );
   fillAssetSelect(
     ui.referenceId,
@@ -913,6 +909,70 @@ function syncCharacterAssets() {
   automatic.value = "auto";
   automatic.textContent = "自动按情绪选参考（试用）";
   ui.referenceId.appendChild(automatic);
+}
+
+function renderServiceState() {
+  const status = serviceState.status || "offline";
+  ui.serviceStrip.dataset.state = status;
+  if (status === "ready") {
+    ui.serviceStatus.textContent = "Character Voice Service：在线";
+  } else if (status === "partial") {
+    ui.serviceStatus.textContent = "Character Voice Service：部分可用";
+  } else if (status === "checking") {
+    ui.serviceStatus.textContent = "Character Voice Service：检查中…";
+  } else {
+    ui.serviceStatus.textContent = "Character Voice Service：不可用";
+  }
+
+  if (!serviceState.engines.length) {
+    ui.engineStatus.textContent = status === "offline"
+      ? (serviceState.error || "无法读取引擎状态")
+      : "未发现语音引擎";
+    return;
+  }
+  ui.engineStatus.textContent = serviceState.engines.map(item => {
+    const id = item.engine || item.id || "unknown";
+    const state = item.status || item.health?.status || "unknown";
+    return `${id}: ${state}`;
+  }).join(" · ");
+}
+
+async function refreshServiceState() {
+  serviceState = { status: "checking", engines: [] };
+  renderServiceState();
+  ui.retryService.disabled = true;
+  try {
+    const [health, discovery] = await Promise.all([
+      fetchJson("/health"),
+      fetchJson("/v1/engines")
+    ]);
+    const healthEngines = Array.isArray(health?.cvs?.engines) ? health.cvs.engines : [];
+    const discovered = Array.isArray(discovery?.engines) ? discovery.engines : [];
+    const byId = new Map();
+    for (const item of discovered) {
+      const id = item.engine || item.id;
+      if (id) byId.set(id, { ...item });
+    }
+    for (const item of healthEngines) {
+      const id = item.engine || item.id;
+      if (!id) continue;
+      byId.set(id, { ...(byId.get(id) || {}), ...item });
+    }
+    const engines = [...byId.values()];
+    const ready = engines.filter(item => (item.status || item.health?.status) === "ready").length;
+    serviceState = {
+      status: health?.cvs?.status === "offline"
+        ? "offline"
+        : (engines.length && ready < engines.length ? "partial" : "ready"),
+      engines,
+      error: health?.cvs?.error || null
+    };
+  } catch (error) {
+    serviceState = { status: "offline", engines: [], error: error.message };
+  } finally {
+    ui.retryService.disabled = false;
+    renderServiceState();
+  }
 }
 
 function installVoices(data) {
@@ -938,9 +998,7 @@ function installVoices(data) {
 
 async function loadVoices() {
   try {
-    const response = await fetch("/v1/voices");
-    if (!response.ok) throw new Error(`HTTP ${response.status}`);
-    const data = await response.json();
+    const data = await fetchJson("/v1/voices");
     try { localStorage.setItem("cvs.voices.cache", JSON.stringify(data)); }
     catch (_) { /* online voice list remains usable */ }
     installVoices(data);
@@ -949,12 +1007,12 @@ async function loadVoices() {
       const cached = JSON.parse(localStorage.getItem("cvs.voices.cache") || "null");
       if (cached?.voices?.length) {
         installVoices(cached);
-        statusOverride = "当前离线；使用已保存的角色列表。";
+        statusOverride = `当前离线；使用已保存的角色列表。 ${error.message}`;
         render();
         return;
       }
     } catch (_) { /* no cached voice list */ }
-    statusOverride = `无法读取角色列表：${error}`;
+    statusOverride = `无法读取角色列表：${error.message}`;
     render();
   }
 }
@@ -1320,6 +1378,15 @@ ui.sleepMinutes.addEventListener("change", () => {
     render();
   }, minutes * 60000);
 });
+ui.retryService.addEventListener("click", async () => {
+  statusOverride = "正在重新连接语音服务……";
+  render();
+  await Promise.all([refreshServiceState(), loadVoices()]);
+  if (serviceState.status === "ready" || serviceState.status === "partial") {
+    statusOverride = "语音服务连接已刷新。";
+    render();
+  }
+});
 ui.loginLibrary.addEventListener("click", loginLibrary);
 ui.loadLibrary.addEventListener("click", loadLibrary);
 ui.saveBook.addEventListener("click", saveCurrentBook);
@@ -1368,6 +1435,7 @@ try {
   ui.theme.value = localStorage.getItem("cvs.reader.theme") || "auto";
   document.body.dataset.theme = ui.theme.value;
 } catch (_) { /* reader preferences stay in memory */ }
+refreshServiceState();
 loadVoices();
 renderOfflineBooks();
 if ("serviceWorker" in navigator) {
