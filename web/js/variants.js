@@ -1,20 +1,61 @@
-const DB_NAME = "cvs-reader-variants";
+const DB_NAME = "character-voice-reader-variants";
+const LEGACY_DB_NAME = "cvs-reader-variants";
 const STORE = "paragraphs";
 
-function openDatabase() {
+function openDatabase(name = DB_NAME, { create = true } = {}) {
   if (!globalThis.indexedDB) return Promise.resolve(null);
   return new Promise(resolve => {
-    const request = indexedDB.open(DB_NAME, 1);
-    request.onupgradeneeded = () => request.result.createObjectStore(STORE);
-    request.onsuccess = () => resolve(request.result);
-    request.onerror = () => resolve(null);
+    const request = indexedDB.open(name, 1);
+    let createdLegacy = false;
+    request.onupgradeneeded = () => {
+      if (!create) {
+        createdLegacy = true;
+        request.transaction.abort();
+        return;
+      }
+      if (!request.result.objectStoreNames.contains(STORE)) {
+        request.result.createObjectStore(STORE);
+      }
+    };
+    request.onsuccess = () => {
+      if (createdLegacy) {
+        request.result.close();
+        resolve(null);
+        return;
+      }
+      if (!request.result.objectStoreNames.contains(STORE)) {
+        request.result.close();
+        resolve(null);
+        return;
+      }
+      resolve(request.result);
+    };
+    request.onerror = () => {
+      if (!create && (createdLegacy || request.error?.name === "AbortError")) {
+        resolve(null);
+      } else {
+        resolve(null);
+      }
+    };
     request.onblocked = () => resolve(null);
+  });
+}
+
+function readFrom(databasePromise, key) {
+  return databasePromise.then(db => {
+    if (!db) return undefined;
+    return new Promise(resolve => {
+      const request = db.transaction(STORE, "readonly").objectStore(STORE).get(key);
+      request.onsuccess = () => resolve(request.result);
+      request.onerror = () => resolve(undefined);
+    });
   });
 }
 
 export class VariantStore {
   constructor() {
     this.database = openDatabase();
+    this.legacyDatabase = openDatabase(LEGACY_DB_NAME, { create: false });
     this.memory = new Map();
   }
 
@@ -23,13 +64,16 @@ export class VariantStore {
   }
 
   async read(key) {
-    const db = await this.database;
-    if (!db) return this.memory.get(key) || { selected: null, versions: [] };
-    return new Promise(resolve => {
-      const request = db.transaction(STORE, "readonly").objectStore(STORE).get(key);
-      request.onsuccess = () => resolve(request.result || { selected: null, versions: [] });
-      request.onerror = () => resolve(this.memory.get(key) || { selected: null, versions: [] });
-    });
+    const current = await readFrom(this.database, key);
+    if (current !== undefined) return current;
+
+    const legacy = await readFrom(this.legacyDatabase, key);
+    if (legacy !== undefined) {
+      // Lazy copy-forward: a legacy value is promoted when first used.
+      await this.write(key, legacy);
+      return legacy;
+    }
+    return this.memory.get(key) || { selected: null, versions: [] };
   }
 
   async write(key, value) {
