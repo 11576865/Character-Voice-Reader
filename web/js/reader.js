@@ -7,7 +7,7 @@ import { ProgressStore, documentIdForFile } from "./progress.js";
 import { ReaderNavigation, chapterStart, chapterPosition } from "./navigation.js";
 import { VariantStore } from "./variants.js";
 import { OfflineLibrary } from "./offline.js";
-import { fetchJson, fetchSpeech, readError } from "./api.js";
+import { fetchJson, fetchSpeech } from "./api.js";
 
 const element = id => document.getElementById(id);
 const ui = {
@@ -93,11 +93,38 @@ let offlineAnnotationsSignature = "";
 let sleepTimer = null;
 let serviceState = { status: "checking", engines: [] };
 
-function bookmarkKey() { return `cvs.bookmarks.v1:${documentId || "manual"}`; }
+const STORAGE_KEYS = {
+  voiceCache: "cvr.voices.cache",
+  fontSize: "cvr.reader.fontSize",
+  theme: "cvr.reader.theme"
+};
+const LEGACY_STORAGE_KEYS = {
+  voiceCache: "cvs.voices.cache",
+  fontSize: "cvs.reader.fontSize",
+  theme: "cvs.reader.theme"
+};
+
+function readMigratedStorage(key, legacyKey) {
+  try {
+    const current = localStorage.getItem(key);
+    if (current !== null) return current;
+    const legacy = localStorage.getItem(legacyKey);
+    if (legacy !== null) {
+      localStorage.setItem(key, legacy);
+      return legacy;
+    }
+  } catch (_) {}
+  return null;
+}
+
+function bookmarkKey() { return `cvr.bookmarks.v1:${documentId || "manual"}`; }
+function legacyBookmarkKey() { return `cvs.bookmarks.v1:${documentId || "manual"}`; }
 
 function bookmarks() {
-  try { return JSON.parse(localStorage.getItem(bookmarkKey()) || "[]"); }
-  catch (_) { return []; }
+  try {
+    const raw = readMigratedStorage(bookmarkKey(), legacyBookmarkKey());
+    return JSON.parse(raw || "[]");
+  } catch (_) { return []; }
 }
 
 function renderBookmarks() {
@@ -999,12 +1026,12 @@ function installVoices(data) {
 async function loadVoices() {
   try {
     const data = await fetchJson("/v1/voices");
-    try { localStorage.setItem("cvs.voices.cache", JSON.stringify(data)); }
+    try { localStorage.setItem(STORAGE_KEYS.voiceCache, JSON.stringify(data)); }
     catch (_) { /* online voice list remains usable */ }
     installVoices(data);
   } catch (error) {
     try {
-      const cached = JSON.parse(localStorage.getItem("cvs.voices.cache") || "null");
+      const cached = JSON.parse(readMigratedStorage(STORAGE_KEYS.voiceCache, LEGACY_STORAGE_KEYS.voiceCache) || "null");
       if (cached?.voices?.length) {
         installVoices(cached);
         statusOverride = `当前离线；使用已保存的角色列表。 ${error.message}`;
@@ -1362,11 +1389,11 @@ ui.goBookmark.addEventListener("click", () => {
 ui.searchNext.addEventListener("click", searchNext);
 ui.fontSize.addEventListener("input", () => {
   ui.readingPane.style.fontSize = `${ui.fontSize.value}px`;
-  localStorage.setItem("cvs.reader.fontSize", ui.fontSize.value);
+  localStorage.setItem(STORAGE_KEYS.fontSize, ui.fontSize.value);
 });
 ui.theme.addEventListener("change", () => {
   document.body.dataset.theme = ui.theme.value;
-  localStorage.setItem("cvs.reader.theme", ui.theme.value);
+  localStorage.setItem(STORAGE_KEYS.theme, ui.theme.value);
 });
 ui.sleepMinutes.addEventListener("change", () => {
   clearTimeout(sleepTimer);
@@ -1430,9 +1457,13 @@ window.addEventListener("pagehide", () => saveProgress(true));
 window.addEventListener("online", syncOfflineChanges);
 render();
 try {
-  ui.fontSize.value = localStorage.getItem("cvs.reader.fontSize") || "18";
+  ui.fontSize.value = readMigratedStorage(
+    STORAGE_KEYS.fontSize, LEGACY_STORAGE_KEYS.fontSize
+  ) || "18";
   ui.readingPane.style.fontSize = `${ui.fontSize.value}px`;
-  ui.theme.value = localStorage.getItem("cvs.reader.theme") || "auto";
+  ui.theme.value = readMigratedStorage(
+    STORAGE_KEYS.theme, LEGACY_STORAGE_KEYS.theme
+  ) || "auto";
   document.body.dataset.theme = ui.theme.value;
 } catch (_) { /* reader preferences stay in memory */ }
 refreshServiceState();
