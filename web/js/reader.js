@@ -327,6 +327,11 @@ function playbackOptions() {
   const speed = Number(ui.speed.value);
   if (!ui.voice.value) throw new Error("请选择角色。");
   if (!Number.isFinite(speed) || speed <= 0) throw new Error("速度必须大于 0。");
+  const voice = voiceCatalog.get(ui.voice.value);
+  const model = voice?.models?.find(item => item.id === ui.modelId.value);
+  if (model?.engine && engineState(model.engine) === "offline") {
+    throw new Error(`所选模型的语音引擎当前不可用：${model.engine}`);
+  }
   return {
     voice: ui.voice.value,
     modelId: ui.modelId.value || null,
@@ -621,7 +626,10 @@ function render(snapshot = queue.snapshot) {
   const choice = selectedReferences.get(index);
   const choiceLabel = choice?.id && ui.referenceId.value === "auto"
     ? ` · 参考：${choice.id}（${choice.reason || "自动"}）` : "";
-  ui.status.textContent = statusOverride || (loading ? "正在读取文件……" : messages[snapshot.state] + choiceLabel);
+  const engineLabel = choice?.engine ? ` · 引擎：${choice.engine}` : "";
+  ui.status.textContent = statusOverride || (
+    loading ? "正在读取文件……" : messages[snapshot.state] + choiceLabel + engineLabel
+  );
 }
 
 function showDocument(model, metadata, id, label) {
@@ -904,6 +912,13 @@ function fillAssetSelect(select, items, defaultId, labelBuilder) {
   }
 }
 
+function engineState(engineId) {
+  if (!engineId) return "unknown";
+  const item = serviceState.engines.find(engine =>
+    (engine.engine || engine.id) === engineId);
+  return item?.status || item?.health?.status || "unknown";
+}
+
 function syncCharacterAssets() {
   const voice = voiceCatalog.get(ui.voice.value);
   if (!voice) {
@@ -917,6 +932,18 @@ function syncCharacterAssets() {
     voice.default_model,
     item => [item.name || item.id, item.engine, item.version].filter(Boolean).join(" · ")
   );
+  for (const option of ui.modelId.options) {
+    const model = voice.models.find(item => item.id === option.value);
+    const state = engineState(model?.engine);
+    if (state === "offline") {
+      option.disabled = true;
+      option.textContent += " · 引擎离线";
+    }
+  }
+  if (ui.modelId.selectedOptions[0]?.disabled) {
+    const replacement = [...ui.modelId.options].find(option => !option.disabled);
+    if (replacement) ui.modelId.value = replacement.value;
+  }
   fillAssetSelect(
     ui.referenceId,
     voice.references,
@@ -999,6 +1026,8 @@ async function refreshServiceState() {
   } finally {
     ui.retryService.disabled = false;
     renderServiceState();
+    if (ui.voice.value) syncCharacterAssets();
+    render();
   }
 }
 
