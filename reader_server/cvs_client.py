@@ -3,6 +3,37 @@ import httpx
 from reader_server.config import CVS_ADMIN_TOKEN, CVS_BASE_URL
 
 
+MAX_ERROR_DETAIL = 500
+
+
+def _normalized_error(response: httpx.Response) -> str:
+    """Return a short human-readable upstream error without dumping HTML pages."""
+    content_type = (response.headers.get("content-type") or "").lower()
+    if "application/json" in content_type or content_type.endswith("+json"):
+        try:
+            payload = response.json()
+            if isinstance(payload, dict):
+                detail = payload.get("detail") or payload.get("error") or payload.get("message")
+                if detail:
+                    return str(detail)[:MAX_ERROR_DETAIL]
+        except Exception:
+            pass
+
+    status = response.status_code
+    if status in {502, 503, 504}:
+        return f"Character Voice Service upstream unavailable (HTTP {status})"
+    if "text/html" in content_type:
+        return f"Character Voice Service returned an HTML error page (HTTP {status})"
+
+    text = (response.text or "").strip()
+    if not text:
+        return f"Character Voice Service request failed (HTTP {status})"
+    single_line = " ".join(text.split())
+    if len(single_line) > MAX_ERROR_DETAIL:
+        single_line = single_line[:MAX_ERROR_DETAIL].rstrip() + "…"
+    return single_line
+
+
 class CVSError(RuntimeError):
     def __init__(self, status_code: int, detail: str):
         super().__init__(detail)
@@ -24,49 +55,50 @@ class CVSClient:
             headers["X-CVS-Token"] = self.admin_token
         return headers
 
-    def json(self, method: str, path: str, *, body=None, admin: bool = False, timeout: float = 30):
+    def _request(self, method: str, path: str, *, timeout: float, **kwargs) -> httpx.Response:
         try:
             response = httpx.request(
                 method,
                 self._url(path),
-                json=body,
-                headers=self._headers(admin=admin),
+                headers=self._headers(admin=bool(kwargs.pop("admin", False))),
                 timeout=timeout,
+                **kwargs,
             )
+        except httpx.TimeoutException as exc:
+            raise CVSError(504, "Character Voice Service request timed out") from exc
         except httpx.HTTPError as exc:
             raise CVSError(503, f"Character Voice Service unavailable: {exc}") from exc
+
         if response.status_code >= 400:
-            try:
-                detail = response.json().get("detail")
-            except Exception:
-                detail = response.text
-            raise CVSError(response.status_code, str(detail or response.text))
-        return response.json()
+            raise CVSError(response.status_code, _normalized_error(response))
+        return response
+
+    def json(self, method: str, path: str, *, body=None, admin: bool = False, timeout: float = 30):
+        response = self._request(
+            method, path, timeout=timeout, json=body, admin=admin
+        )
+        try:
+            return response.json()
+        except Exception as exc:
+            raise CVSError(
+                502,
+                f"Character Voice Service returned invalid JSON ({response.headers.get('content-type', 'unknown')})",
+            ) from exc
 
     def speech(self, payload: dict) -> tuple[bytes, dict]:
-        try:
-            response = httpx.post(self._url("/v1/audio/speech"), json=payload, timeout=180)
-        except httpx.HTTPError as exc:
-            raise CVSError(503, f"Character Voice Service unavailable: {exc}") from exc
-        if response.status_code >= 400:
-            try:
-                detail = response.json().get("detail")
-            except Exception:
-                detail = response.text
-            raise CVSError(response.status_code, str(detail or response.text))
+        response = self._request(
+            "POST", "/v1/audio/speech", timeout=180, json=payload
+        )
+        content_type = (response.headers.get("content-type") or "").lower()
+        if not (content_type.startswith("audio/wav") or content_type.startswith("audio/x-wav")):
+            raise CVSError(
+                502,
+                f"Character Voice Service returned non-WAV audio response: {content_type or 'unknown'}",
+            )
         return response.content, dict(response.headers)
 
     def bytes(self, path: str, *, admin: bool = False) -> tuple[bytes, str]:
-        try:
-            response = httpx.get(
-                self._url(path),
-                headers=self._headers(admin=admin),
-                timeout=30,
-            )
-        except httpx.HTTPError as exc:
-            raise CVSError(503, f"Character Voice Service unavailable: {exc}") from exc
-        if response.status_code >= 400:
-            raise CVSError(response.status_code, response.text)
+        response = self._request("GET", path, timeout=30, admin=admin)
         return response.content, response.headers.get(
             "content-type", "application/octet-stream"
         )
