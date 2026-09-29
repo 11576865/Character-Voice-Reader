@@ -1,0 +1,120 @@
+<!doctype html>
+<html lang="en">
+<meta charset="utf-8">
+<title>Reader Core module tests</title>
+<pre id="result">RUNNING</pre>
+<script type="module">
+import { documentFromManual, documentFromTxt, readTxtFile } from "../web/js/sources.js";
+import { segmentDocument } from "../web/js/segmenter.js";
+import { ReaderQueue } from "../web/js/queue.js";
+
+const output = document.getElementById("result");
+let passed = 0;
+function assert(condition, message) {
+  if (!condition) throw new Error(message);
+  passed += 1;
+}
+function deferred() {
+  let resolve;
+  const promise = new Promise(done => { resolve = done; });
+  return { promise, resolve };
+}
+
+try {
+  const manual = documentFromManual("One.\n\nTwo!");
+  assert(manual.chapters.length === 1, "manual input must create one chapter");
+  assert(manual.chapters[0].paragraphs.length === 2, "manual paragraphs");
+
+  const txt = documentFromTxt("第1章 开始\n\n第一段。\n\n第二段。\n\nChapter 2 Next\n\nThird paragraph.", "Book");
+  assert(txt.title === "Book" && txt.chapters.length === 2, "TXT chapter detection");
+  assert(txt.chapters[0].paragraphs.length === 2, "TXT paragraphs in first chapter");
+  const file = new File([new TextEncoder().encode("Chapter 1 Start\n\nHello.")], "sample.txt");
+  const imported = await readTxtFile(file);
+  assert(imported.title === "sample" && imported.chapters[0].paragraphs[0] === "Hello.", "UTF-8 file reading");
+  let rejectedInvalidUtf8 = false;
+  try { await readTxtFile(new File([new Uint8Array([0xff])], "bad.txt")); }
+  catch (_) { rejectedInvalidUtf8 = true; }
+  assert(rejectedInvalidUtf8, "invalid UTF-8 must be rejected");
+
+  const document = { title: "Book", chapters: [
+    { title: "A", paragraphs: ["She said, “Hello. How are you?” Then left. Next sentence."] },
+    { title: "B", paragraphs: ["The value is 3.14. Then it changes."] }
+  ] };
+  const segments = segmentDocument(document, { maxChars: 45 });
+  assert(segments.some(segment => segment.chapterTitle === "B"), "chapter relationship retained");
+  assert(segments.every(segment => segment.originalText === document.chapters[segment.chapterIndex].paragraphs[segment.paragraphIndex]), "original paragraph retained");
+  for (const chapter of document.chapters) {
+    const pieces = segments.filter(segment => segment.chapterTitle === chapter.title);
+    assert(pieces.map(segment => segment.text).join("") === chapter.paragraphs[0], "segments must reconstruct original text");
+  }
+  assert(!segments.some(segment => segment.text.endsWith("Hello.")), "do not cut a quoted sentence");
+  assert(!segments.some(segment => segment.text.endsWith("3.")), "do not cut decimal number");
+  const bracketed = segmentDocument({ title: "B", chapters: [{ title: "C", paragraphs: ["Before (wait? yes) after. More."] }] }, { maxChars: 30 });
+  assert(!bracketed.some(segment => segment.text.endsWith("wait?")), "do not cut parentheses");
+  const straightQuotes = segmentDocument({ title: "B", chapters: [{ title: "C", paragraphs: ['She said "Hello. How are you?" Then left.'] }] }, { maxChars: 30 });
+  assert(!straightQuotes.some(segment => segment.text.endsWith("Hello.")), "do not cut straight quotes");
+
+  const requests = [];
+  const plays = [];
+  const fakePlayer = {
+    async play(blob) { plays.push(blob); },
+    pause() { this.paused = true; },
+    async resume() { this.paused = false; },
+    stop() { this.stopped = true; }
+  };
+  const queue = new ReaderQueue({
+    player: fakePlayer,
+    requestAudio({ segment, modelId, referenceId, signal }) {
+      const task = deferred();
+      requests.push({ segment, modelId, referenceId, signal, task });
+      return task.promise;
+    }
+  });
+  const queueSegments = ["A", "B", "C"].map((text, index) => ({ index, text }));
+  const started = queue.start(queueSegments, {
+    voice: "march-7th", modelId: "self-400", referenceId: "surprised", speed: 1
+  });
+  assert(queue.state === "generating" && requests.length === 1, "first segment generating");
+  assert(requests[0].modelId === "self-400" && requests[0].referenceId === "surprised",
+    "queue carries registered model and reference selection");
+  requests[0].task.resolve(new Blob(["first"]));
+  await started;
+  assert(queue.state === "playing" && requests.length === 2, "play current and prefetch one next");
+  queue.pause();
+  assert(queue.state === "paused" && fakePlayer.paused, "pause state");
+  await queue.resume();
+  assert(queue.state === "playing" && !fakePlayer.paused, "resume state");
+  requests[1].task.resolve(new Blob(["second"]));
+  await queue.prefetchPromise;
+  assert(queue.snapshot.prefetchReady && requests.length === 2, "only one next audio retained");
+  await queue.handleEnded();
+  assert(queue.index === 1 && plays.length === 2 && requests.length === 3, "advance and prefetch following segment");
+  queue.stop();
+  assert(queue.state === "stopped" && queue.snapshot.total === 0, "stop resets queue");
+  assert(requests[2].signal.aborted && queue.nextAudio === null, "stop cancels prefetch and clears next audio");
+
+  const finishedQueue = new ReaderQueue({
+    player: fakePlayer,
+    async requestAudio() { return new Blob(["audio"]); }
+  });
+  await finishedQueue.start([queueSegments[0]], { voice: "march-7th" });
+  await finishedQueue.handleEnded();
+  assert(finishedQueue.state === "finished", "last segment enters finished state");
+
+  const delayed = deferred();
+  const stoppedQueue = new ReaderQueue({
+    player: fakePlayer,
+    requestAudio() { return delayed.promise; }
+  });
+  const delayedStart = stoppedQueue.start([queueSegments[0]], { voice: "march-7th" });
+  stoppedQueue.stop();
+  delayed.resolve(new Blob(["late"]));
+  await delayedStart;
+  assert(stoppedQueue.state === "stopped" && stoppedQueue.snapshot.total === 0, "late response cannot restart stopped queue");
+
+  output.textContent = `PASS: ${passed} assertions`;
+} catch (error) {
+  output.textContent = `FAIL: ${error.stack || error}`;
+}
+</script>
+</html>

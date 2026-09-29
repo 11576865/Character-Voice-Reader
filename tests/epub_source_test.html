@@ -1,0 +1,141 @@
+<!doctype html>
+<html lang="en">
+<meta charset="utf-8">
+<title>EPUB source tests</title>
+<pre id="result">RUNNING</pre>
+<script type="module">
+import { parseEpub, readEpubFile } from "../web/js/epub_source.js";
+import { segmentDocument } from "../web/js/segmenter.js";
+
+const output = document.getElementById("result");
+let passed = 0;
+function assert(condition, message) {
+  if (!condition) throw new Error(message);
+  passed += 1;
+}
+function bytes(...parts) {
+  const result = new Uint8Array(parts.reduce((size, part) => size + part.length, 0));
+  let offset = 0;
+  for (const part of parts) { result.set(part, offset); offset += part.length; }
+  return result;
+}
+function crc32(data) {
+  let crc = 0xffffffff;
+  for (const byte of data) {
+    crc ^= byte;
+    for (let i = 0; i < 8; i += 1) crc = (crc >>> 1) ^ (crc & 1 ? 0xedb88320 : 0);
+  }
+  return (crc ^ 0xffffffff) >>> 0;
+}
+function makeZip(files) {
+  const encoder = new TextEncoder();
+  const local = [];
+  const central = [];
+  let position = 0;
+  for (const file of files) {
+    const name = encoder.encode(file.name);
+    const plain = encoder.encode(file.text);
+    const compressed = file.compressed || plain;
+    const method = file.compressed ? 8 : 0;
+    const crc = crc32(plain);
+    const localHeader = new Uint8Array(30);
+    const localView = new DataView(localHeader.buffer);
+    localView.setUint32(0, 0x04034b50, true);
+    localView.setUint16(4, 20, true);
+    localView.setUint16(6, 0x800, true);
+    localView.setUint16(8, method, true);
+    localView.setUint32(14, crc, true);
+    localView.setUint32(18, compressed.length, true);
+    localView.setUint32(22, plain.length, true);
+    localView.setUint16(26, name.length, true);
+    local.push(localHeader, name, compressed);
+
+    const centralHeader = new Uint8Array(46);
+    const centralView = new DataView(centralHeader.buffer);
+    centralView.setUint32(0, 0x02014b50, true);
+    centralView.setUint16(4, 20, true);
+    centralView.setUint16(6, 20, true);
+    centralView.setUint16(8, 0x800, true);
+    centralView.setUint16(10, method, true);
+    centralView.setUint32(16, crc, true);
+    centralView.setUint32(20, compressed.length, true);
+    centralView.setUint32(24, plain.length, true);
+    centralView.setUint16(28, name.length, true);
+    centralView.setUint32(42, position, true);
+    central.push(centralHeader, name);
+    position += localHeader.length + name.length + compressed.length;
+  }
+  const directory = bytes(...central);
+  const end = new Uint8Array(22);
+  const endView = new DataView(end.buffer);
+  endView.setUint32(0, 0x06054b50, true);
+  endView.setUint16(8, files.length, true);
+  endView.setUint16(10, files.length, true);
+  endView.setUint32(12, directory.length, true);
+  endView.setUint32(16, position, true);
+  return bytes(...local, directory, end);
+}
+
+try {
+  const container = '<?xml version="1.0"?><container xmlns="urn:oasis:names:tc:opendocument:xmlns:container" version="1.0"><rootfiles><rootfile full-path="OEBPS/content.opf" media-type="application/oebps-package+xml"/></rootfiles></container>';
+  const opf = '<?xml version="1.0"?><package xmlns="http://www.idpf.org/2007/opf" version="3.0"><metadata xmlns:dc="http://purl.org/dc/elements/1.1/"><dc:title>星海纪事</dc:title><dc:creator>Test Author</dc:creator></metadata><manifest><item id="one" href="Text/ch1.xhtml" media-type="application/xhtml+xml"/><item id="two" href="Text/ch2.xhtml" media-type="application/xhtml+xml"/></manifest><spine><itemref idref="two"/><itemref idref="one"/></spine></package>';
+  const first = '<html xmlns="http://www.w3.org/1999/xhtml"><body><h1>Chapter One</h1><p>First <em>line</em>.</p><p>Second line.</p><script>ignore me<\/script></body></html>';
+  const second = '<html><body><h1>Chapter Two</h1><p>Next chapter.</p></body></html>';
+  const deflatedSecond = new Uint8Array([179,201,40,201,205,177,179,73,202,79,169,180,179,201,48,180,115,206,72,44,40,73,45,82,8,41,207,183,209,207,48,180,179,41,176,243,75,173,40,81,72,134,136,235,217,232,23,216,217,232,67,148,235,131,245,2,0]);
+  const zip = makeZip([
+    { name: "mimetype", text: "application/epub+zip" },
+    { name: "META-INF/container.xml", text: container },
+    { name: "OEBPS/content.opf", text: opf },
+    { name: "OEBPS/Text/ch1.xhtml", text: first },
+    { name: "OEBPS/Text/ch2.xhtml", text: second, compressed: deflatedSecond }
+  ]);
+
+  const parsed = await parseEpub(zip.buffer, "Fallback");
+  assert(Object.keys(parsed.document).join(",") === "title,chapters", "TextDocument shape");
+  assert(parsed.document.title === "星海纪事", "metadata title");
+  assert(parsed.metadata.author === "Test Author", "metadata author");
+  assert(parsed.document.chapters.length === 2, "two spine chapters");
+  assert(parsed.document.chapters[0].title === "Chapter Two", "spine order, not ZIP order");
+  assert(parsed.document.chapters[0].paragraphs.includes("Next chapter."), "deflated XHTML decoded");
+  assert(parsed.document.chapters[1].paragraphs.includes("First line."), "inline XHTML text extracted");
+  assert(!parsed.document.chapters[1].paragraphs.some(text => text.includes("ignore me")), "script text omitted");
+  const segments = segmentDocument(parsed.document);
+  assert(segments[0].chapterTitle === "Chapter Two" && segments.at(-1).chapterTitle === "Chapter One", "Reader Core receives chapter order");
+
+  const file = new File([zip], "demo.epub", { type: "application/epub+zip" });
+  const imported = await readEpubFile(file);
+  assert(imported.document.title === "星海纪事", "file upload path");
+  const noHeading = '<html><body><ul><li><p>List entry.</p></li></ul></body></html>';
+  const fallbackZip = makeZip([
+    { name: "META-INF/container.xml", text: container },
+    { name: "OEBPS/content.opf", text: opf },
+    { name: "OEBPS/Text/ch1.xhtml", text: noHeading },
+    { name: "OEBPS/Text/ch2.xhtml", text: second }
+  ]);
+  const fallback = await parseEpub(fallbackZip.buffer);
+  assert(fallback.document.chapters[1].title === "ch1.xhtml", "chapter title falls back to filename");
+  assert(fallback.document.chapters[1].paragraphs.filter(text => text === "List entry.").length === 1, "nested list paragraph is not duplicated");
+  let rejected = false;
+  try { await parseEpub(new Uint8Array([1, 2, 3]).buffer); }
+  catch (_) { rejected = true; }
+  assert(rejected, "invalid ZIP rejected");
+  // Damage an uncompressed XML entry while leaving the ZIP directory CRC intact.
+  const damagedContainer = zip.slice();
+  const containerMarker = new TextEncoder().encode("rootfiles");
+  for (let i = 0; i <= damagedContainer.length - containerMarker.length; i += 1) {
+    if (containerMarker.every((byte, offset) => damagedContainer[i + offset] === byte)) {
+      damagedContainer[i] ^= 1;
+      break;
+    }
+  }
+  let rejectedChecksum = false;
+  try { await parseEpub(damagedContainer.buffer); }
+  catch (error) { rejectedChecksum = error.message.includes("校验失败"); }
+  assert(rejectedChecksum, "corrupt ZIP content rejected by CRC");
+
+  output.textContent = `PASS: ${passed} assertions`;
+} catch (error) {
+  output.textContent = `FAIL: ${error.stack || error}`;
+}
+</script>
+</html>
