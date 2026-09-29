@@ -1,4 +1,5 @@
-export const PROGRESS_KEY_PREFIX = "cvs.reader.progress.v1:";
+export const PROGRESS_KEY_PREFIX = "cvr.reader.progress.v1:";
+export const LEGACY_PROGRESS_KEY_PREFIX = "cvs.reader.progress.v1:";
 const VERSION = 1;
 
 // Two independent 32-bit rolling hashes keep IDs stable on HTTP LAN pages,
@@ -67,10 +68,20 @@ export class ProgressStore {
   load(documentId, document, segments) {
     if (!documentId || !Array.isArray(segments) || !segments.length) return null;
     const key = PROGRESS_KEY_PREFIX + documentId;
+    const legacyKey = LEGACY_PROGRESS_KEY_PREFIX + documentId;
     let raw = null;
     if (this.available) {
-      try { raw = this.storage.getItem(key); }
-      catch (_) { this.available = false; }
+      try {
+        raw = this.storage.getItem(key);
+        if (raw === null) {
+          const legacy = this.storage.getItem(legacyKey);
+          if (legacy !== null) {
+            raw = legacy;
+            // Copy forward, but retain the legacy record during the v0.2 migration window.
+            this.storage.setItem(key, legacy);
+          }
+        }
+      } catch (_) { this.available = false; }
     }
     const fallback = this.memory.get(key);
     let record;
