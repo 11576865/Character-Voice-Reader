@@ -42,6 +42,7 @@ class FakeCVS:
         return b"RIFF....WAVE", {
             "content-type": "audio/wav",
             "x-selected-reference": payload.get("reference_id") or "neutral",
+            "x-cvs-generation-revision": "a" * 64,
         }
 
     def bytes(self, path, **kwargs):
@@ -72,6 +73,7 @@ def test_voice_and_speech_are_cvs_contract_proxies(monkeypatch):
     assert speech.status_code == 200
     assert speech.content.startswith(b"RIFF")
     assert speech.headers["x-selected-reference"] == "neutral"
+    assert speech.headers["x-cvs-generation-revision"] == "a" * 64
 
 
 def test_book_library_is_reader_owned(tmp_path, monkeypatch):
