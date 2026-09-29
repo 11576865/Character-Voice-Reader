@@ -4,7 +4,7 @@
 <title>Reader state tests</title>
 <pre id="result">RUNNING</pre>
 <script type="module">
-import { ProgressStore, PROGRESS_KEY_PREFIX, documentIdForFile } from "../web/js/progress.js";
+import { ProgressStore, PROGRESS_KEY_PREFIX, LEGACY_PROGRESS_KEY_PREFIX, documentIdForFile } from "../web/js/progress.js";
 import { ReaderNavigation, chapterStart, chapterPosition } from "../web/js/navigation.js";
 import { ReaderQueue } from "../web/js/queue.js";
 import { AudioPlayer } from "../web/js/player.js";
@@ -55,6 +55,20 @@ try {
   const local = storage();
   const store = new ProgressStore(local);
   assert(store.available, "working localStorage is detected");
+  const legacyLocal = storage();
+  legacyLocal.setItem(LEGACY_PROGRESS_KEY_PREFIX + id, JSON.stringify({
+    version: 1, documentId: id, title: epubDocument.title,
+    chapterIndex: 2, segmentIndex: chapterThree, audioTime: 3.5,
+    updatedAt: "2026-09-29T00:00:00.000Z"
+  }));
+  const migratedStore = new ProgressStore(legacyLocal);
+  const migrated = migratedStore.load(id, epubDocument, segments);
+  assert(migrated.audioTime === 3.5, "legacy CVS progress remains readable");
+  assert(legacyLocal.getItem(PROGRESS_KEY_PREFIX + id) !== null,
+    "legacy progress is copied into the CVR namespace");
+  assert(legacyLocal.getItem(LEGACY_PROGRESS_KEY_PREFIX + id) !== null,
+    "legacy progress is retained during the migration window");
+
   assert(store.save({ documentId: id, title: epubDocument.title, chapterIndex: 2,
     segmentIndex: chapterThree, audioTime: 2.5 }), "progress save succeeds");
   const loaded = store.load(id, epubDocument, segments);
