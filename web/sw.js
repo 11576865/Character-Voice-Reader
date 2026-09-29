@@ -1,9 +1,10 @@
-const CACHE = "character-voice-reader-shell-v1";
+const CACHE = "character-voice-reader-shell-v2";
 const SHELL = ["/", "/reader-assets/js/reader.js", "/reader-assets/js/sources.js",
   "/reader-assets/js/epub_source.js", "/reader-assets/js/segmenter.js",
   "/reader-assets/js/player.js", "/reader-assets/js/queue.js",
   "/reader-assets/js/progress.js", "/reader-assets/js/navigation.js",
-  "/reader-assets/js/variants.js", "/reader-assets/js/offline.js"];
+  "/reader-assets/js/variants.js", "/reader-assets/js/offline.js",
+  "/reader-assets/js/api.js"];
 
 self.addEventListener("install", event => {
   event.waitUntil(caches.open(CACHE).then(cache => cache.addAll(SHELL)));
