@@ -452,12 +452,6 @@ function renderBody() {
     });
     ui.documentBody.appendChild(section);
   });
-  if (currentBookId && !offlineMode && navigator.onLine) {
-    libraryFetch(`/v1/books/${currentBookId}/progress`, {
-      method: "PUT", headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ segmentIndex: position.index, audioTime: time })
-    }).catch(() => {});
-  }
 }
 
 function fillParagraphReferences() {
