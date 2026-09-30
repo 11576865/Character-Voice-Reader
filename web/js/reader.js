@@ -273,10 +273,23 @@ async function requestAudio(options) {
   if (offlineMode) throw new Error("此段音频未下载，离线时无法重新生成。 ");
   const selectedVersion = bookVersions[segmentId];
   const metadata = selectedVersion?.metadata;
-  const expectedReference = options.referenceId || voiceCatalog.get(options.voice)?.default_reference;
+  const voiceSummary = voiceCatalog.get(options.voice);
+  const expectedModelAlias = options.modelId || voiceSummary?.default_model || null;
+  const expectedModel = voiceSummary?.models?.find(item => item.id === expectedModelAlias) || null;
+  const expectedResolvedModel = expectedModel?.model_id || expectedModelAlias;
+  const expectedModelRevision = expectedModel?.revision || null;
+  const expectedReference = options.referenceId || voiceSummary?.default_reference;
+  const modelMatches = !expectedModelAlias ||
+    metadata?.model_alias === expectedModelAlias ||
+    metadata?.model_id === expectedResolvedModel;
+  const revisionMatches = !expectedModelRevision ||
+    metadata?.model_revision === expectedModelRevision;
+  const speedMatches = Number(metadata?.speed ?? 1) === Number(options.speed);
   const versionMatches = metadata?.pronunciationsUpdatedAt === pronunciationsUpdatedAt &&
     metadata?.voice === options.voice &&
-    (!options.modelId || metadata.model_id === options.modelId) &&
+    modelMatches &&
+    revisionMatches &&
+    speedMatches &&
     (expectedReference === "auto" || !expectedReference || metadata.reference_id === expectedReference);
   if (currentBookId && segmentId && versionMatches) {
     const response = await fetch(`/v1/books/${currentBookId}/audio/${segmentId}`, {
