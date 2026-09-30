@@ -50,30 +50,35 @@
     <section class="panel" aria-labelledby="voiceTitle">
       <div class="section-head">
         <div class="section-title"><span class="step">02</span><h2 id="voiceTitle">语音设置</h2></div>
-        <p class="section-note">角色、模型与参考语音会固定在当前播放会话中。</p>
+        <p class="section-note">正常阅读只需选择角色与语速；模型和参考语音由系统默认处理。</p>
       </div>
-      <div class="voice-grid">
+      <div class="voice-primary-grid">
         <div class="field">
-          <label for="voice">角色</label>
+          <label for="voice">角色语音</label>
           <select id="voice" disabled></select>
         </div>
-        <div class="field">
-          <label for="modelId">模型</label>
-          <select id="modelId" disabled></select>
-        </div>
-        <div class="field">
-          <label for="referenceId">参考语音</label>
-          <select id="referenceId" disabled></select>
-        </div>
         <div class="field compact">
-          <label for="speed">速度</label>
+          <label for="speed">语速</label>
           <input id="speed" type="number" min="0.1" step="0.1" value="1.0">
         </div>
-        <div class="field wide-action">
-          <label>&nbsp;</label>
-          <button id="previewReference" type="button">试听参考</button>
-        </div>
       </div>
+      <details class="compact-details voice-advanced">
+        <summary>高级语音设置</summary>
+        <div class="voice-grid advanced-grid">
+          <div class="field">
+            <label for="modelId">模型</label>
+            <select id="modelId" disabled></select>
+          </div>
+          <div class="field">
+            <label for="referenceId">参考语音</label>
+            <select id="referenceId" disabled></select>
+          </div>
+          <div class="field wide-action">
+            <label>&nbsp;</label>
+            <button id="previewReference" type="button">试听参考</button>
+          </div>
+        </div>
+      </details>
     </section>
 
     <div id="bookInfo" class="meta-strip" aria-label="书籍信息">
