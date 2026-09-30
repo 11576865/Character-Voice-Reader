@@ -45,11 +45,15 @@ async function testTwoAheadPrefetch() {
   requests[0].task.resolve(new Blob(["A"]));
   await started;
   assert.equal(queue.state, "playing");
-  assert.equal(requests.length, 3, "current segment should prefetch the next two segments");
+  assert.equal(requests.length, 2,
+    "two-ahead window should start only one synthesis request at a time");
   assert.equal(queue.snapshot.prefetchDepth, 2);
   assert.equal(queue.snapshot.prefetchPendingCount, 2);
 
   requests[1].task.resolve(new Blob(["B"]));
+  await flush();
+  assert.equal(requests.length, 3,
+    "second look-ahead request should start only after the first prefetch resolves");
   requests[2].task.resolve(new Blob(["C"]));
   await flush();
   assert.equal(queue.snapshot.prefetchReadyCount, 2);
