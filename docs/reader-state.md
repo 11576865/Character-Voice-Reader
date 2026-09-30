@@ -22,7 +22,7 @@ TXT 和 EPUB 文件的阅读位置保存在当前浏览器的 `localStorage`，�
 
 文件 ID 由来源类型（TXT/EPUB）、原始文件字节数和两组 32 位滚动内容哈希组成，不使用文件名或本机路径。同一文件改名或在别的目录重新选择，ID 不变；文件字节发生变化会生成新 ID。滚动哈希不是加密散列，理论上可能碰撞；这里仅用作本地进度定位，不用于安全校验。
 
-重新选择同一 TXT/EPUB 时，页面查找旧记录，提示“继续阅读”或“从头开始”。继续会从保存的片段和音频时间恢复；从头开始会覆盖旧进度并朗读第一片段。手动粘贴文本没有长期 `documentId`，因此刷新后不恢复。
+重新选择同一 TXT/EPUB 时，页面查找旧记录，提示“继续阅读”或“从头开始”。继续会从保存的片段和音频时间恢复；从头开始会覆盖旧进度并朗读第一片段。手动粘贴文本没有长期 `documentId`，因此刷新后不恢复。播放层另外维护 `generationRevision` 与 `playbackRevision`；它们只用于隔离异步生成与播放生命周期，不写入阅读进度。
 
 存储不可用时页面给出提示，本次页面内仍可继续朗读；损坏的 JSON、未知版本或无效记录被忽略。若记录的片段索引超出当前文档范围，回退到记录章节首个可朗读片段；该章节也为空时回退到全书第一片段，并清零音频时间。空章节无法作为播放目标，导航按钮会跳过它们。
 
@@ -30,7 +30,7 @@ TXT 和 EPUB 文件的阅读位置保存在当前浏览器的 `localStorage`，�
 
 ## 跳转流程
 
-章节列表、上一章/下一章、上一段/下一段都交给 `ReaderNavigation` 计算目标。有效跳转先记录新位置，再调用 `ReaderQueue.start()`：队列递增会话编号、取消当前请求和预取请求、停止播放器、释放旧 Object URL、清空 `nextAudio`，然后只请求目标片段。过期请求即使晚返回也不能覆盖新会话。新的片段开始播放后，只预取紧邻的下一片段。
+章节列表、上一章/下一章、上一段/下一段都交给 `ReaderNavigation` 计算目标。有效跳转先记录新位置，再调用 `ReaderQueue.start()`：队列递增 `generationRevision` / `playbackRevision`、取消当前请求和预取请求、停止播放器、释放旧 Object URL，并从目标片段重新建立播放窗口。过期请求即使晚返回也不能覆盖新 revision。新的片段开始播放后，默认保持后方 2 个片段的预取窗口。
 
 正在播放、生成或暂停时都可跳转。无效目标不会改变播放状态；连续快速跳转以最后一次有效跳转为准。重新加载文件时先保存当前进度并停止旧队列；文件读取结果也有序号保护，旧文件的迟到结果不会替换新文件。
 
@@ -42,8 +42,46 @@ TXT 和 EPUB 文件的阅读位置保存在当前浏览器的 `localStorage`，�
 | `segmenter.js` | `TextDocument` 转换为保留章节、段落和原文位置的 `AudioSegment[]`。 |
 | `progress.js` | 文件 ID、进度校验和 localStorage 读写；不控制播放。 |
 | `navigation.js` | 章节与片段的目标索引、边界和跳转协调。 |
-| `queue.js` | 播放状态、当前片段、单段预取、请求取消和会话隔离。 |
+| `queue.js` | PlaybackSession 状态、当前片段、两段预取、请求取消、自动重试和 revision 隔离。 |
 | `player.js` | HTML audio、暂停/继续、音频时间和 Object URL 生命周期。 |
 | `reader.js` | 文件加载、UI、模块协作及保存时机；不解析文件，也不直接操作 audio。 |
 
 Reader 仍通过现有 `GET /v1/voices` 和 `POST /v1/audio/speech` 使用 Character Voice Service；进度功能不改变语音 API。
+
+
+## Online Reader v1 播放状态机
+
+当前队列状态为：
+
+```text
+idle
+  ↓
+loading
+  ↓
+playing ↔ paused
+  ↓
+advancing
+  ↓
+playing
+
+任何生成/播放失败
+  ↓
+error
+
+Stop / 切换来源
+  ↓
+cancelled
+
+末段播放完成
+  ↓
+finished
+```
+
+语义：
+
+- `pause`：只暂停当前 HTML audio，保留 session、当前位置和预取结果；
+- `stop`：取消所有 owned 生成请求、清空预取窗口、释放当前音频，阅读位置由上层保存；
+- `skip/jump`：创建新的 generation/playback revision，旧请求即使晚返回也直接失效；
+- 单个片段生成失败会自动重试 1 次；仍失败进入 `error`，不静默跳过正文；
+- `error` 保留当前片段，可由“重试”重新生成，也可由上一段/下一段/章节跳转离开；
+- 默认 `prefetchDepth = 2`，播放 N 时尽量准备 N+1 与 N+2，但不预生成整章。
