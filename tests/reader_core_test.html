@@ -74,24 +74,28 @@ try {
   const started = queue.start(queueSegments, {
     voice: "march-7th", modelId: "self-400", referenceId: "surprised", speed: 1
   });
-  assert(queue.state === "generating" && requests.length === 1, "first segment generating");
+  assert(queue.state === "loading" && requests.length === 1, "first segment loading");
   assert(requests[0].modelId === "self-400" && requests[0].referenceId === "surprised",
     "queue carries registered model and reference selection");
   requests[0].task.resolve(new Blob(["first"]));
   await started;
-  assert(queue.state === "playing" && requests.length === 2, "play current and prefetch one next");
+  assert(queue.state === "playing" && requests.length === 3, "play current and prefetch two ahead");
   queue.pause();
   assert(queue.state === "paused" && fakePlayer.paused, "pause state");
   await queue.resume();
   assert(queue.state === "playing" && !fakePlayer.paused, "resume state");
   requests[1].task.resolve(new Blob(["second"]));
-  await queue.prefetchPromise;
-  assert(queue.snapshot.prefetchReady && requests.length === 2, "only one next audio retained");
+  requests[2].task.resolve(new Blob(["third"]));
+  await Promise.resolve();
+  await Promise.resolve();
+  assert(queue.snapshot.prefetchReadyCount === 2 && requests.length === 3,
+    "two-ahead prefetch retains the next two audio blobs");
   await queue.handleEnded();
-  assert(queue.index === 1 && plays.length === 2 && requests.length === 3, "advance and prefetch following segment");
+  assert(queue.index === 1 && plays.length === 2 && requests.length === 3,
+    "advance consumes prefetched audio without an extra request when window is already full");
   queue.stop();
-  assert(queue.state === "stopped" && queue.snapshot.total === 0, "stop resets queue");
-  assert(requests[2].signal.aborted && queue.nextAudio === null, "stop cancels prefetch and clears next audio");
+  assert(queue.state === "cancelled" && queue.snapshot.total === 0, "stop cancels queue");
+  assert(queue.snapshot.prefetchReadyCount === 0, "stop clears prefetched audio");
 
   const finishedQueue = new ReaderQueue({
     player: fakePlayer,
@@ -110,7 +114,7 @@ try {
   stoppedQueue.stop();
   delayed.resolve(new Blob(["late"]));
   await delayedStart;
-  assert(stoppedQueue.state === "stopped" && stoppedQueue.snapshot.total === 0, "late response cannot restart stopped queue");
+  assert(stoppedQueue.state === "cancelled" && stoppedQueue.snapshot.total === 0, "late response cannot restart stopped queue");
 
   output.textContent = `PASS: ${passed} assertions`;
 } catch (error) {
