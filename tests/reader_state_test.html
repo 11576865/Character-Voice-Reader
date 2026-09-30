@@ -115,21 +115,22 @@ try {
     onJump: position => jumps.push(position)
   });
   const initial = nav.jumpToChapter(0);
-  assert(queue.state === "generating" && queue.index === 0, "chapter jump begins at first segment");
+  assert(queue.state === "loading" && queue.index === 0, "chapter jump begins loading first segment");
   requests[0].task.resolve(new Blob(["first"]));
   await initial;
   nav.sync(queue.snapshot);
-  assert(queue.state === "playing" && requests.length === 2, "single prefetch starts while playing");
+  assert(queue.state === "playing" && requests.length >= 2, "prefetch starts while playing");
   assert(await nav.previousSegment() === false, "previous segment rejects lower bound");
   assert(await nav.previousChapter() === false, "previous chapter rejects lower bound");
 
   requests[1].task.resolve(new Blob(["prefetched"]));
-  await queue.prefetchPromise;
-  assert(queue.nextAudio !== null, "one next audio retained");
+  await Promise.resolve();
+  await Promise.resolve();
+  assert(queue.snapshot.prefetchReadyCount >= 1, "prefetched audio retained");
   const changed = nav.jumpToChapter(2);
-  assert(queue.index === chapterThree && queue.state === "generating", "EPUB chapter jump changes queue index");
-  assert(queue.nextAudio === null && queue.prefetchPromise === null && player.stops >= 2,
-    "chapter jump stops player and clears prefetch");
+  assert(queue.index === chapterThree && queue.state === "loading", "EPUB chapter jump changes queue index");
+  assert(queue.snapshot.prefetchReadyCount === 0 && queue.snapshot.prefetchPendingCount === 0 && player.stops >= 2,
+    "chapter jump stops player and resets prefetch window");
   assert(jumps.at(-1).index === chapterThree, "chapter jump reports new progress target");
   const pending = requests.at(-1);
   const rapid = nav.previousSegment();
@@ -156,15 +157,15 @@ try {
   assert(await nav.nextChapter() === false, "next chapter rejects upper bound");
   queue.pause();
   const fromPause = nav.jumpToChapter(0);
-  assert(queue.state === "generating" && queue.index === 0,
+  assert(queue.state === "loading" && queue.index === 0,
     "chapter jump from pause replaces paused audio");
   requests.at(-1).task.resolve(new Blob(["restart"]));
   await fromPause;
   assert(queue.state === "playing" && player.plays.at(-1).blob.size === 7,
     "paused chapter jump plays only the target audio");
   queue.stop();
-  assert(queue.nextAudio === null && queue.snapshot.total === 0 && queue.state === "stopped",
-    "stop clears one-audio prefetch and queue");
+  assert(queue.snapshot.prefetchReadyCount === 0 && queue.snapshot.total === 0 && queue.state === "cancelled",
+    "stop clears prefetch window and queue");
 
   const listeners = new Map();
   const audio = {
