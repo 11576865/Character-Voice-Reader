@@ -156,8 +156,11 @@ export class ReaderQueue {
     // Keep a two-segment look-ahead window, but generate the look-ahead clips
     // sequentially instead of issuing two synthesis requests at once.
     entry.promise = Promise.resolve(after)
-      .then(() => {
+      .then(previousEntry => {
         if (generationRevision !== this.generationRevision) return null;
+        if (previousEntry?.status === "error") {
+          throw previousEntry.error || new Error("前序预取失败。");
+        }
         return this.#fetchWithRetry(index, generationRevision);
       })
       .then(blob => {
