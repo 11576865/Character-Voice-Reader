@@ -134,6 +134,34 @@ async function testManualRetryAfterError() {
   assert.equal(player.plays.length, 1);
 }
 
+async function testPrefetchFailureDoesNotFanOut() {
+  const requests = [];
+  const player = fakePlayer();
+  const queue = new ReaderQueue({
+    player,
+    prefetchDepth: 2,
+    retryLimit: 0,
+    requestAudio({ segment }) {
+      const task = deferred();
+      requests.push({ segment, task });
+      return task.promise;
+    }
+  });
+  const segments = ["A", "B", "C"].map((text, index) => ({ index, text }));
+  const started = queue.start(segments, { voice: "march-7th" });
+  requests[0].task.resolve(new Blob(["A"]));
+  await started;
+  assert.equal(requests.length, 2);
+
+  requests[1].task.reject(new Error("prefetch failed"));
+  await flush();
+  assert.equal(requests.length, 2,
+    "failure of N+1 must not start synthesis for N+2");
+  await queue.handleEnded();
+  assert.equal(queue.state, "error");
+  assert.equal(queue.index, 1);
+}
+
 async function testPauseStopSemantics() {
   const player = fakePlayer();
   const queue = new ReaderQueue({
@@ -156,6 +184,7 @@ await testTwoAheadPrefetch();
 await testStaleResponsesCannotWin();
 await testRetryOnceThenError();
 await testManualRetryAfterError();
+await testPrefetchFailureDoesNotFanOut();
 await testPauseStopSemantics();
 
 console.log("PASS: ReaderQueue resilient playback tests");
