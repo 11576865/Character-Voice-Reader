@@ -139,7 +139,7 @@ export class ReaderQueue {
     throw lastError || new Error("音频生成失败。");
   }
 
-  #ensurePrefetch(index, generationRevision) {
+  #ensurePrefetch(index, generationRevision, after = null) {
     if (index < 0 || index >= this.segments.length) return null;
     const existing = this.prefetches.get(index);
     if (existing) return existing.promise;
@@ -152,7 +152,14 @@ export class ReaderQueue {
       promise: null
     };
 
-    entry.promise = this.#fetchWithRetry(index, generationRevision)
+    // GPU engines are intentionally treated as single-concurrency resources.
+    // Keep a two-segment look-ahead window, but generate the look-ahead clips
+    // sequentially instead of issuing two synthesis requests at once.
+    entry.promise = Promise.resolve(after)
+      .then(() => {
+        if (generationRevision !== this.generationRevision) return null;
+        return this.#fetchWithRetry(index, generationRevision);
+      })
       .then(blob => {
         if (generationRevision !== this.generationRevision || !blob) return null;
         entry.status = "ready";
@@ -179,8 +186,12 @@ export class ReaderQueue {
       if (index <= this.index) this.prefetches.delete(index);
     }
 
+    let previous = null;
     for (let offset = 1; offset <= this.prefetchDepth; offset += 1) {
-      this.#ensurePrefetch(this.index + offset, generationRevision);
+      const index = this.index + offset;
+      if (index >= this.segments.length) break;
+      const existing = this.prefetches.get(index);
+      previous = existing?.promise || this.#ensurePrefetch(index, generationRevision, previous);
     }
   }
 
