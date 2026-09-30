@@ -130,7 +130,7 @@ def _model_metadata(summary: dict, alias: str | None) -> tuple[str | None, dict]
     return effective, model
 
 
-@app.get("/health")
+@app.get("/health/live")\ndef health_live():\n    return {"status": "ok", "service": "character-voice-reader"}\n\n\n@app.get("/health")
 def health():
     return {"status": "ok", "service": "character-voice-reader", "cvs": cvs.health()}
 
