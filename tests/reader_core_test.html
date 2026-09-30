@@ -85,12 +85,10 @@ try {
   await queue.resume();
   assert(queue.state === "playing" && !fakePlayer.paused, "resume state");
   requests[1].task.resolve(new Blob(["second"]));
-  await Promise.resolve();
-  await Promise.resolve();
+  await new Promise(resolve => setTimeout(resolve, 0));
   assert(requests.length === 3, "second look-ahead starts after first prefetch completes");
   requests[2].task.resolve(new Blob(["third"]));
-  await Promise.resolve();
-  await Promise.resolve();
+  await new Promise(resolve => setTimeout(resolve, 0));
   assert(queue.snapshot.prefetchReadyCount === 2 && requests.length === 3,
     "two-ahead prefetch retains the next two audio blobs");
   await queue.handleEnded();
