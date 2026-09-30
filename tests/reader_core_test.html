@@ -79,12 +79,15 @@ try {
     "queue carries registered model and reference selection");
   requests[0].task.resolve(new Blob(["first"]));
   await started;
-  assert(queue.state === "playing" && requests.length === 3, "play current and prefetch two ahead");
+  assert(queue.state === "playing" && requests.length === 2, "play current and start sequential two-ahead prefetch");
   queue.pause();
   assert(queue.state === "paused" && fakePlayer.paused, "pause state");
   await queue.resume();
   assert(queue.state === "playing" && !fakePlayer.paused, "resume state");
   requests[1].task.resolve(new Blob(["second"]));
+  await Promise.resolve();
+  await Promise.resolve();
+  assert(requests.length === 3, "second look-ahead starts after first prefetch completes");
   requests[2].task.resolve(new Blob(["third"]));
   await Promise.resolve();
   await Promise.resolve();
