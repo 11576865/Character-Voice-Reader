@@ -25,12 +25,12 @@
 | `segmenter.js` | 按句末标点和目标长度切分，优先保留引号、括号、句子及章节关系。 |
 | `progress.js` | 根据 TXT/EPUB 原始文件内容生成稳定 ID，在浏览器 localStorage 保存并验证进度。 |
 | `navigation.js` | 计算章节/片段跳转目标，跳过空章节，并让队列从目标位置重新开始。 |
-| `queue.js` | 管理 `idle / generating / playing / paused / stopped / finished` 状态、当前片段和一个预取片段；停止时取消请求并清空音频。 |
+| `queue.js` | 管理 `idle / loading / playing / paused / advancing / error / cancelled / finished` 状态、两段预取窗口、自动重试和 generation/playback revision；停止时取消请求并清空音频。 |
 | `player.js` | 独立控制浏览器音频的播放、暂停、继续、停止、时间定位与播放结束回调，并释放 Object URL。 |
 | `reader.js` | 协调来源、导航、进度、UI 与语音 HTTP 请求；UI 不直接控制 audio 元素。 |
 | `index.html` | 页面结构和样式。 |
 
-队列播放第 N 个片段时仅请求第 N+1 个片段。预取完成后只保存一个 Blob；播放结束后消费它并开始下一次预取。不保存历史音频。若当前片段播放完而预取尚未结束，状态转为 `generating`，完成后继续播放。
+队列播放第 N 个片段时默认同时准备 N+1 与 N+2。播放结束后消费 N+1，并立即补齐新的两段预取窗口。不保存历史音频。若当前片段播放完而下一段尚未完成，状态转为 `advancing`，等待同一 revision 下的预取完成后继续播放。单段生成失败自动重试 1 次；第二次仍失败则进入 `error`，保留当前位置供用户重试或跳过。
 
 页面为章节栏与正文双栏布局，手机上章节栏可折叠。正文按 TextDocument 展示，当前朗读片段高亮；自动滚动仅在片段离开可见区域且用户最近没有手动滚动时进行。TXT/EPUB 的恢复和章节跳转细节见 [Reader 状态与进度](reader-state.md)。
 
@@ -64,4 +64,14 @@ EPUB 输入层输出相同的 TextDocument，并保留 OPF spine 的章节顺序
 - 超长且完全无安全断点的句子可超过目标长度，以免切断引号、括号或单词。
 - TXT/EPUB 进度只保存在当前浏览器、当前站点来源；手动粘贴文本不做跨刷新恢复。
 - 片段定位由当前切分规则决定；未来修改切分规则后，旧索引可能需要回退。
-- 单段预取不能消除生成时间超过剩余播放时间时的等待。
+- 两段预取仍不能保证生成耗时极端偏高时完全无缝；但可显著降低正常连续阅读中的段间等待。
+
+
+## PlaybackSession revision
+
+ReaderQueue 不再只依靠一个会话编号，而是显式维护：
+
+- `generationRevision`：任何跳段、换章节、停止、重试或重新开始都会使旧生成结果失效；
+- `playbackRevision`：记录当前播放目标代际，随新的播放目标推进。
+
+网络请求携带当前 revision 到 Reader 内部请求上下文；真正接受响应时仍以队列当前 revision 为准。AbortController 是主动取消手段，revision check 是最终一致性保护：即使网络栈不能及时取消，旧响应也不能重新启动或覆盖新的播放会话。
