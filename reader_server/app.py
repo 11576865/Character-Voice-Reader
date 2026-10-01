@@ -37,6 +37,7 @@ generation_ledger = GenerationLedger(DATA_DIR)
 cvs = CVSClient()
 generation_pool = ThreadPoolExecutor(max_workers=1, thread_name_prefix="cvr-book")
 active_jobs: dict[str, threading.Event] = {}
+pause_jobs: dict[str, threading.Event] = {}
 jobs_lock = threading.Lock()
 
 
@@ -438,7 +439,12 @@ def select_book_version(book_id: str, segment_id: str, request: SelectionRequest
     return {"selected": request.version_id}
 
 
-def _generate_book(book_id: str, settings: dict, cancel: threading.Event):
+def _generate_book(
+    book_id: str,
+    settings: dict,
+    cancel: threading.Event,
+    pause: threading.Event,
+):
     book = library.get_book(book_id)
     total = len(book["segments"])
     job = {
@@ -454,9 +460,21 @@ def _generate_book(book_id: str, settings: dict, cancel: threading.Event):
     try:
         voice_map = _voice_map()
         for segment in book["segments"]:
+            while pause.is_set() and not cancel.is_set():
+                if job.get("status") != "paused":
+                    job["status"] = "paused"
+                    job["updatedAt"] = _now_iso()
+                    library.set_job(book_id, job)
+                time.sleep(0.2)
+
             if cancel.is_set():
                 job["status"] = "cancelled"
                 break
+
+            if job.get("status") == "paused":
+                job["status"] = "running"
+                job["updatedAt"] = _now_iso()
+                library.set_job(book_id, job)
 
             current_segment = {
                 "id": segment["id"],
@@ -615,6 +633,7 @@ def _generate_book(book_id: str, settings: dict, cancel: threading.Event):
         finally:
             with jobs_lock:
                 active_jobs.pop(book_id, None)
+                pause_jobs.pop(book_id, None)
 
 
 def _now_iso():
@@ -632,7 +651,9 @@ def generate_book(book_id: str, request: GenerationRequest):
         if book_id in active_jobs:
             raise HTTPException(status_code=409, detail="Book generation already running")
         cancel = threading.Event()
+        pause = threading.Event()
         active_jobs[book_id] = cancel
+        pause_jobs[book_id] = pause
     settings = request.model_dump()
     library.set_job(book_id, {
         "status": "queued", "completed": 0,
@@ -640,7 +661,7 @@ def generate_book(book_id: str, request: GenerationRequest):
         "settings": settings, "updatedAt": _now_iso(), "error": None,
         "current_segment": None, "failed_segment": None,
     })
-    generation_pool.submit(_generate_book, book_id, settings, cancel)
+    generation_pool.submit(_generate_book, book_id, settings, cancel, pause)
     return {"status": "queued", "book_id": book_id}
 
 
@@ -660,7 +681,9 @@ def retry_book_job(book_id: str):
         if book_id in active_jobs:
             raise HTTPException(status_code=409, detail="Book generation already running")
         cancel = threading.Event()
+        pause = threading.Event()
         active_jobs[book_id] = cancel
+        pause_jobs[book_id] = pause
 
     library.set_job(book_id, {
         "status": "queued",
@@ -673,7 +696,7 @@ def retry_book_job(book_id: str):
         "failed_segment": previous.get("failed_segment"),
         "retry_of_updatedAt": previous.get("updatedAt"),
     })
-    generation_pool.submit(_generate_book, book_id, settings, cancel)
+    generation_pool.submit(_generate_book, book_id, settings, cancel, pause)
     return {
         "status": "queued",
         "book_id": book_id,
@@ -687,9 +710,45 @@ def book_job(book_id: str):
     job = library.job(book_id)
     with jobs_lock:
         active = book_id in active_jobs
-    if job["status"] in {"running", "queued"} and not active:
+    if job["status"] in {"running", "queued", "paused", "pausing"} and not active:
         job["status"] = "interrupted"
     return job
+
+
+@app.post("/v1/books/{book_id}/pause", dependencies=[Depends(require_admin)])
+def pause_book_job(book_id: str):
+    get_book_or_404(book_id)
+    with jobs_lock:
+        cancel = active_jobs.get(book_id)
+        pause = pause_jobs.get(book_id)
+    if not cancel or not pause or cancel.is_set():
+        raise HTTPException(status_code=409, detail="Book generation is not running")
+    pause.set()
+    job = library.job(book_id)
+    if job.get("status") in {"running", "queued"}:
+        job["status"] = "pausing"
+        job["updatedAt"] = _now_iso()
+        library.set_job(book_id, job)
+    return {"pausing": True}
+
+
+@app.post("/v1/books/{book_id}/resume", dependencies=[Depends(require_admin)])
+def resume_book_job(book_id: str):
+    get_book_or_404(book_id)
+    with jobs_lock:
+        cancel = active_jobs.get(book_id)
+        pause = pause_jobs.get(book_id)
+    if not cancel or not pause or cancel.is_set():
+        raise HTTPException(status_code=409, detail="Book generation is not running")
+    if not pause.is_set():
+        raise HTTPException(status_code=409, detail="Book generation is not paused")
+    pause.clear()
+    job = library.job(book_id)
+    if job.get("status") in {"paused", "pausing"}:
+        job["status"] = "running"
+        job["updatedAt"] = _now_iso()
+        library.set_job(book_id, job)
+    return {"resumed": True}
 
 
 @app.post("/v1/books/{book_id}/cancel", dependencies=[Depends(require_admin)])
@@ -697,8 +756,11 @@ def cancel_book_job(book_id: str):
     get_book_or_404(book_id)
     with jobs_lock:
         cancel = active_jobs.get(book_id)
+        pause = pause_jobs.get(book_id)
     if cancel:
         cancel.set()
+        if pause:
+            pause.clear()
     return {"cancelling": bool(cancel)}
 
 
