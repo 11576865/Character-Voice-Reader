@@ -47,6 +47,7 @@ const ui = {
   suggestSpeakers: element("suggestSpeakers"), speakerSuggestions: element("speakerSuggestions"),
   paragraphVoice: element("paragraphVoice"), paragraphReference: element("paragraphReference"),
   applyParagraphVoice: element("applyParagraphVoice"),
+  generateSelectedParagraph: element("generateSelectedParagraph"),
   pronunciationFrom: element("pronunciationFrom"), pronunciationTo: element("pronunciationTo"),
   addPronunciation: element("addPronunciation"), pronunciationList: element("pronunciationList"),
   addBookmark: element("addBookmark"), bookmarkList: element("bookmarkList"),
@@ -691,6 +692,40 @@ function selectParagraph(chapterIndex, paragraphIndex, node) {
   fillParagraphReferences();
   ui.paragraphReference.value = marked?.reference_id || "";
   ui.applyParagraphVoice.disabled = false;
+  ui.generateSelectedParagraph.disabled = !currentBookId || offlineMode;
+}
+
+async function generateSelectedParagraphAudio() {
+  if (!selectedParagraph || !currentBookId) {
+    ui.jobStatus.textContent = "请先打开书库中的书籍并选择段落。";
+    return;
+  }
+  try {
+    const options = playbackOptions();
+    const marked = annotations[
+      annotationKey(selectedParagraph.chapterIndex, selectedParagraph.paragraphIndex)
+    ];
+    const payload = {
+      voice: marked?.voice || options.voice,
+      model_id: marked?.voice && marked.voice !== options.voice ? null : options.modelId,
+      reference_id: marked?.reference_id || options.referenceId,
+      speed: options.speed,
+      continuous_emotion: ui.continuousEmotion.checked,
+      scope: "paragraph",
+      chapter_index: selectedParagraph.chapterIndex,
+      paragraph_index: selectedParagraph.paragraphIndex
+    };
+    await libraryFetch(`/v1/books/${currentBookId}/generate`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(payload)
+    });
+    ui.jobStatus.textContent =
+      `已开始生成第 ${selectedParagraph.chapterIndex + 1} 章，第 ${selectedParagraph.paragraphIndex + 1} 段。`;
+    await pollJob();
+  } catch (error) {
+    ui.jobStatus.textContent = `段落生成失败：${error.message}`;
+  }
 }
 
 async function applyParagraphVoice() {
@@ -749,6 +784,8 @@ function render(snapshot = queue.snapshot) {
   ui.nextSegment.disabled = !hasDocument || loading || awaitingChoice || index >= segments.length - 1;
   ui.regenerateParagraph.disabled = !hasDocument || loading || awaitingChoice || !ui.voice.value || offlineMode;
   ui.previewSelection.disabled = !hasDocument || loading || !ui.voice.value || offlineMode;
+  ui.generateSelectedParagraph.disabled =
+    !selectedParagraph || !currentBookId || offlineMode || loading;
   ui.previousChapter.disabled = !hasDocument || loading || awaitingChoice ||
     !segments.some(segment => segment.chapterIndex < chapterIndex);
   ui.nextChapter.disabled = !hasDocument || loading || awaitingChoice ||
@@ -1578,6 +1615,7 @@ ui.voice.addEventListener("change", () => {
 });
 ui.paragraphVoice.addEventListener("change", fillParagraphReferences);
 ui.applyParagraphVoice.addEventListener("click", applyParagraphVoice);
+ui.generateSelectedParagraph.addEventListener("click", generateSelectedParagraphAudio);
 ui.addPronunciation.addEventListener("click", () => {
   updatePronunciation(ui.pronunciationFrom.value, ui.pronunciationTo.value);
   ui.pronunciationFrom.value = "";
