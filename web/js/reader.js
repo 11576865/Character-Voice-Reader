@@ -12,7 +12,7 @@ const element = id => document.getElementById(id);
 const ui = {
   voice: element("voice"), modelId: element("modelId"), referenceId: element("referenceId"),
   previewReference: element("previewReference"),
-  speed: element("speed"), text: element("text"),
+  speed: element("speed"), prefetchAhead: element("prefetchAhead"), text: element("text"),
   txtFile: element("txtFile"), epubFile: element("epubFile"), documentFile: element("documentFile"),
   manualPanel: element("manualPanel"),
   useManual: element("useManual"), start: element("start"), pause: element("pause"), stop: element("stop"),
@@ -476,13 +476,18 @@ queue = new ReaderQueue({ player, requestAudio, onChange: onQueueChange });
 
 function playbackOptions() {
   const speed = Number(ui.speed.value);
+  const prefetchAhead = Number(ui.prefetchAhead.value);
   if (!ui.voice.value) throw new Error("请选择角色。");
   if (!Number.isFinite(speed) || speed <= 0) throw new Error("速度必须大于 0。");
+  if (!Number.isInteger(prefetchAhead) || prefetchAhead < 0 || prefetchAhead > 4) {
+    throw new Error("提前生成段数必须在 0 到 4 之间。");
+  }
   return {
     voice: ui.voice.value,
     modelId: ui.modelId.value || null,
     referenceId: ui.referenceId.value || null,
-    speed
+    speed,
+    prefetchAhead
   };
 }
 
@@ -738,6 +743,7 @@ function render(snapshot = queue.snapshot) {
   ui.modelId.disabled = active || loading || !ui.modelId.options.length;
   ui.referenceId.disabled = active || loading || !ui.referenceId.options.length;
   ui.speed.disabled = active || loading;
+  ui.prefetchAhead.disabled = active || loading;
   ui.useManual.disabled = loading;
   ui.previousSegment.disabled = !hasDocument || loading || awaitingChoice || index <= 0;
   ui.nextSegment.disabled = !hasDocument || loading || awaitingChoice || index >= segments.length - 1;
@@ -1592,6 +1598,9 @@ ui.theme.addEventListener("change", () => {
   document.body.dataset.theme = ui.theme.value;
   localStorage.setItem("cvs.reader.theme", ui.theme.value);
 });
+ui.prefetchAhead.addEventListener("change", () => {
+  localStorage.setItem("cvs.reader.prefetchAhead", ui.prefetchAhead.value);
+});
 ui.sleepMinutes.addEventListener("change", () => {
   clearTimeout(sleepTimer);
   const minutes = Number(ui.sleepMinutes.value);
@@ -1663,6 +1672,7 @@ try {
   ui.readingPane.style.fontSize = `${ui.fontSize.value}px`;
   ui.theme.value = localStorage.getItem("cvs.reader.theme") || "auto";
   document.body.dataset.theme = ui.theme.value;
+  ui.prefetchAhead.value = localStorage.getItem("cvs.reader.prefetchAhead") || "1";
 } catch (_) { /* reader preferences stay in memory */ }
 loadVoices();
 renderOfflineBooks();
