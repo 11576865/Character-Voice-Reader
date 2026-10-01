@@ -196,6 +196,7 @@ def test_book_generation_persists_runtime_provenance(tmp_path, monkeypatch):
             "continuous_emotion": False,
         },
         __import__("threading").Event(),
+        __import__("threading").Event(),
     )
 
     state = library.versions(book["id"])
