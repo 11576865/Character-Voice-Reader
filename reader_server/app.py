@@ -16,6 +16,7 @@ from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
 from reader_server.book_library import BookLibrary
+from reader_server.generation_ledger import GenerationLedger
 from reader_server.config import ADMIN_TOKEN, DATA_DIR, HOST, PORT, WEB_DIR
 from reader_server.cvs_client import CVSClient, CVSError
 from reader_server.document_import import parse_document
@@ -32,6 +33,7 @@ if FOLIATE_DIR.is_dir():
     app.mount("/foliate-assets", StaticFiles(directory=FOLIATE_DIR), name="foliate-assets")
 
 library = BookLibrary(DATA_DIR)
+generation_ledger = GenerationLedger(DATA_DIR)
 cvs = CVSClient()
 generation_pool = ThreadPoolExecutor(max_workers=1, thread_name_prefix="cvr-book")
 active_jobs: dict[str, threading.Event] = {}
@@ -190,7 +192,46 @@ def speech(request: SpeechRequest):
     ):
         if name in headers:
             forwarded[name] = headers[name]
+    generation_ledger.append(
+        source="interactive",
+        text=request.input,
+        audio=audio,
+        metadata={
+            "voice": headers.get("x-cvs-voice") or request.voice,
+            "model": headers.get("x-cvs-model") or request.model_id,
+            "model_revision": headers.get("x-cvs-model-revision"),
+            "engine": headers.get("x-cvs-engine"),
+            "runtime": headers.get("x-cvs-runtime"),
+            "runtime_revision": headers.get("x-cvs-runtime-revision"),
+            "binding": headers.get("x-cvs-binding"),
+            "binding_revision": headers.get("x-cvs-binding-revision"),
+            "generation_revision": headers.get("x-cvs-generation-revision"),
+            "reference_id": headers.get("x-selected-reference") or request.reference_id,
+            "speed": request.speed,
+            "request_id": headers.get("x-cvs-request-id"),
+        },
+    )
     return Response(content=audio, media_type=headers.get("content-type", "audio/wav"), headers=forwarded)
+
+
+@app.get("/v1/generation-history", dependencies=[Depends(require_admin)])
+def generation_history(limit: int = 50):
+    try:
+        return {"items": generation_ledger.recent(limit=limit)}
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+@app.get(
+    "/v1/books/{book_id}/generation-history",
+    dependencies=[Depends(require_admin)],
+)
+def book_generation_history(book_id: str, limit: int = 50):
+    get_book_or_404(book_id)
+    try:
+        return {"items": generation_ledger.recent(limit=limit, book_id=book_id)}
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
 
 
 @app.get(
@@ -496,7 +537,7 @@ def _generate_book(book_id: str, settings: dict, cancel: threading.Event):
                     "text": text_to_speak,
                     "generation_revision": actual_generation_revision,
                 }, sort_keys=True).encode()).hexdigest()
-                library.add_version(book_id, segment["id"], audio, {
+                record = library.add_version(book_id, segment["id"], audio, {
                     "voice": voice,
                     "model_alias": model_alias,
                     "model_id": headers.get("x-cvs-model") or provenance.get("model"),
@@ -521,6 +562,29 @@ def _generate_book(book_id: str, settings: dict, cancel: threading.Event):
                     "fingerprint": actual_fingerprint,
                     "pronunciationsUpdatedAt": book.get("pronunciationsUpdatedAt"),
                 })
+                metadata = record["metadata"]
+                generation_ledger.append(
+                    source="book",
+                    text=text_to_speak,
+                    audio=audio,
+                    book_id=book_id,
+                    segment_id=segment["id"],
+                    metadata={
+                        "voice": metadata.get("voice"),
+                        "model": metadata.get("model_id"),
+                        "model_revision": metadata.get("model_revision"),
+                        "engine": metadata.get("engine"),
+                        "runtime": metadata.get("runtime"),
+                        "runtime_revision": metadata.get("runtime_revision"),
+                        "binding": metadata.get("binding"),
+                        "binding_revision": metadata.get("binding_revision"),
+                        "generation_revision": metadata.get("generation_revision"),
+                        "reference_id": metadata.get("reference_id"),
+                        "speed": metadata.get("speed"),
+                        "request_id": headers.get("x-cvs-request-id"),
+                    },
+                )
+
 
             job["completed"] += 1
             job["updatedAt"] = _now_iso()
