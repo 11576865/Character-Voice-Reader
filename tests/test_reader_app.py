@@ -238,3 +238,59 @@ def test_generation_history_endpoint_is_admin_protected(monkeypatch):
     assert item["runtime"] == "gpt-sovits-local"
     assert item["input_sha256"] == "i" * 64
     assert item["output_sha256"] == "o" * 64
+
+
+def test_failed_book_generation_can_be_retried(tmp_path, monkeypatch):
+    fake = FakeCVS()
+    monkeypatch.setattr(app_module, "cvs", fake)
+    library = BookLibrary(tmp_path / "data")
+    monkeypatch.setattr(app_module, "library", library)
+    monkeypatch.setattr(app_module, "generation_ledger", FakeLedger())
+
+    document = {"title": "Retry", "chapters": [{"title": "One", "paragraphs": ["Hello."]}]}
+    segments = [{
+        "chapterIndex": 0, "paragraphIndex": 0,
+        "start": 0, "end": 6, "text": "Hello.",
+    }]
+    book = library.put_book(document, segments, kind="txt")
+    failed_segment = {
+        "id": book["segments"][0]["id"],
+        "index": 0,
+        "chapterIndex": 0,
+        "paragraphIndex": 0,
+    }
+    library.set_job(book["id"], {
+        "status": "failed",
+        "completed": 0,
+        "total": 1,
+        "settings": {
+            "voice": "march-7th",
+            "model_id": "local-v4",
+            "reference_id": "neutral",
+            "speed": 1.0,
+            "continuous_emotion": False,
+        },
+        "updatedAt": "2026-10-02T00:00:00+00:00",
+        "error": "temporary failure",
+        "current_segment": failed_segment,
+        "failed_segment": failed_segment,
+    })
+
+    class ImmediatePool:
+        def submit(self, fn, *args):
+            fn(*args)
+
+    monkeypatch.setattr(app_module, "generation_pool", ImmediatePool())
+
+    response = client.post(
+        f"/v1/books/{book['id']}/retry",
+        headers={"X-CVR-Token": app_module.ADMIN_TOKEN},
+    )
+    assert response.status_code == 200
+    assert response.json()["retrying_segment"]["id"] == failed_segment["id"]
+
+    job = library.job(book["id"])
+    assert job["status"] == "completed"
+    assert job["error"] is None
+    state = library.versions(book["id"])
+    assert book["segments"][0]["id"] in state
