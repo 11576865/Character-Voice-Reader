@@ -104,6 +104,7 @@
         <div id="status" role="status" aria-live="polite">正在读取角色列表……</div>
         <div id="currentChapter">当前章节：—</div>
         <div id="position">尚未开始阅读</div>
+        <progress id="readingProgress" max="1" value="0" aria-label="全书阅读进度"></progress>
       </div>
       <div class="controls playback-controls">
         <button id="previousChapter" type="button" disabled>上一章</button>
@@ -189,6 +190,32 @@
               <input id="fontSize" type="range" min="14" max="30" value="18">
             </div>
             <div class="field">
+              <label for="lineHeight">行距</label>
+              <select id="lineHeight">
+                <option value="1.6">紧凑</option>
+                <option value="1.75">较紧凑</option>
+                <option value="1.86" selected>标准</option>
+                <option value="2.05">宽松</option>
+              </select>
+            </div>
+            <div class="field">
+              <label for="readingWidth">正文宽度</label>
+              <select id="readingWidth">
+                <option value="640">窄</option>
+                <option value="760">中等</option>
+                <option value="860" selected>标准</option>
+                <option value="1000">宽</option>
+              </select>
+            </div>
+            <div class="field">
+              <label for="paragraphGap">段间距</label>
+              <select id="paragraphGap">
+                <option value="0.8">紧凑</option>
+                <option value="1.15" selected>标准</option>
+                <option value="1.55">宽松</option>
+              </select>
+            </div>
+            <div class="field">
               <label for="theme">主题</label>
               <select id="theme">
                 <option value="auto">系统</option>
@@ -224,6 +251,7 @@
               <select id="paragraphReference"></select>
             </div>
             <button id="applyParagraphVoice" type="button" disabled>保存段落标注</button>
+            <button id="startSelectedParagraph" type="button" disabled>从所选段落开始</button>
             <button id="generateSelectedParagraph" type="button" disabled>生成所选段落</button>
           </div>
         </div>
