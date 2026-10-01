@@ -161,6 +161,16 @@ def voices():
         _cvs_error(exc)
 
 
+@app.post("/v1/audio/resolve")
+def resolve_speech(request: SpeechRequest):
+    if not request.input.strip():
+        raise HTTPException(status_code=400, detail="input cannot be empty")
+    try:
+        return cvs.json("POST", "/v1/audio/resolve", body=request.model_dump())
+    except CVSError as exc:
+        _cvs_error(exc)
+
+
 @app.post("/v1/audio/speech")
 def speech(request: SpeechRequest):
     if not request.input.strip():
