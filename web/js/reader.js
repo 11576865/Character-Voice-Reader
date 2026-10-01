@@ -26,8 +26,13 @@ const ui = {
   chaptersPanel: element("chaptersPanel"), readingPane: element("readingPane"),
   documentBody: element("documentBody"), currentChapter: element("currentChapter"),
   position: element("position"), status: element("status"), storageNotice: element("storageNotice"),
+  generationState: element("generationState"),
+  generationVoice: element("generationVoice"), generationModel: element("generationModel"),
+  generationEngine: element("generationEngine"), generationRuntime: element("generationRuntime"),
+  generationRuntimeRevision: element("generationRuntimeRevision"),
+  generationRevision: element("generationRevision"),
   paragraphVersions: element("paragraphVersions"), selectVersion: element("selectVersion"),
-  deleteVersion: element("deleteVersion"),
+  deleteVersion: element("deleteVersion"), versionProvenance: element("versionProvenance"),
   libraryToken: element("libraryToken"), loginLibrary: element("loginLibrary"),
   loadLibrary: element("loadLibrary"),
   saveBook: element("saveBook"), generateBook: element("generateBook"),
@@ -71,6 +76,67 @@ const segmentNodes = new Map();
 const chapterButtons = [];
 const selectedReferences = new Map();
 const generationProvenance = new Map();
+
+function shortRevision(value) {
+  return value ? String(value).slice(0, 12) : "—";
+}
+
+function normalizedProvenance(source = {}) {
+  return {
+    voice: source.voice || null,
+    model: source.model || source.model_id || source.modelId || null,
+    engine: source.engine || null,
+    runtime: source.runtime || source.runtime_id || null,
+    runtimeRevision: source.runtimeRevision || source.runtime_revision || null,
+    generationRevision: source.generationRevision || source.generation_revision || null,
+    binding: source.binding || null,
+    bindingRevision: source.bindingRevision || source.binding_revision || null,
+    phase: source.phase || "ready"
+  };
+}
+
+function setSegmentProvenance(index, source) {
+  if (!Number.isInteger(index)) return;
+  generationProvenance.set(index, normalizedProvenance(source));
+}
+
+function renderGenerationProvenance(index) {
+  const provenance = generationProvenance.get(index);
+  ui.generationVoice.textContent = provenance?.voice || "—";
+  ui.generationModel.textContent = provenance?.model || "—";
+  ui.generationEngine.textContent = provenance?.engine || "—";
+  ui.generationRuntime.textContent = provenance?.runtime || "—";
+  ui.generationRuntimeRevision.textContent = shortRevision(provenance?.runtimeRevision);
+  ui.generationRevision.textContent = shortRevision(provenance?.generationRevision);
+  const states = {
+    resolving: "正在解析生成链",
+    preparing: "正在准备 Runtime",
+    generating: "正在生成音频",
+    ready: "生成链已确认",
+    cached: "使用已保存音频"
+  };
+  ui.generationState.textContent = provenance ? (states[provenance.phase] || "生成链已确认") : "尚无生成记录";
+}
+
+function renderVersionProvenance(version) {
+  if (!version) {
+    ui.versionProvenance.textContent = "当前段落还没有保存的生成版本。";
+    return;
+  }
+  const metadata = version.metadata || {};
+  const engine = metadata.engine || "未记录";
+  const runtime = metadata.runtime || metadata.runtime_id || "未记录";
+  const generationRevision = shortRevision(
+    metadata.generation_revision || metadata.generationRevision
+  );
+  const runtimeRevision = shortRevision(
+    metadata.runtime_revision || metadata.runtimeRevision
+  );
+  ui.versionProvenance.innerHTML =
+    `<strong>${engine}</strong> · Runtime ${runtime}<br>` +
+    `Runtime revision ${runtimeRevision} · Generation revision ${generationRevision}<br>` +
+    `生成于 ${new Date(version.createdAt).toLocaleString()}`;
+}
 let regenerationController = null;
 let versionRenderSerial = 0;
 let currentBookId = null;
@@ -233,18 +299,35 @@ async function updatePronunciation(source, replacement) {
 }
 
 async function fetchFreshAudio({ segment, voice, modelId, referenceId, speed, signal }) {
+  const payload = {
+    voice,
+    model_id: modelId || null,
+    reference_id: referenceId || null,
+    input: spokenText(segment.text),
+    response_format: "wav",
+    speed
+  };
+  setSegmentProvenance(segment.index, {
+    voice, model: modelId, phase: "resolving"
+  });
+  render();
+
+  const resolved = await fetch("/v1/audio/resolve", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    signal,
+    body: JSON.stringify(payload)
+  });
+  if (!resolved.ok) throw new Error((await resolved.text()) || `HTTP ${resolved.status}`);
+  const plan = await resolved.json();
+  setSegmentProvenance(segment.index, { ...plan, phase: "preparing" });
+  render();
+
   const response = await fetch("/v1/audio/speech", {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     signal,
-    body: JSON.stringify({
-      voice,
-      model_id: modelId || null,
-      reference_id: referenceId || null,
-      input: spokenText(segment.text),
-      response_format: "wav",
-      speed
-    })
+    body: JSON.stringify(payload)
   });
   if (!response.ok) throw new Error((await response.text()) || `HTTP ${response.status}`);
   const contentType = response.headers.get("content-type") || "";
@@ -256,12 +339,16 @@ async function fetchFreshAudio({ segment, voice, modelId, referenceId, speed, si
     id: response.headers.get("X-Selected-Reference"),
     reason: response.headers.get("X-Reference-Reason")
   });
-  generationProvenance.set(segment.index, {
+  setSegmentProvenance(segment.index, {
+    voice: response.headers.get("X-CVS-Voice") || voice,
     engine: response.headers.get("X-CVS-Engine"),
     runtime: response.headers.get("X-CVS-Runtime"),
     runtimeRevision: response.headers.get("X-CVS-Runtime-Revision"),
-    model: response.headers.get("X-CVS-Model"),
-    generationRevision: response.headers.get("X-CVS-Generation-Revision")
+    model: response.headers.get("X-CVS-Model") || modelId,
+    generationRevision: response.headers.get("X-CVS-Generation-Revision"),
+    binding: response.headers.get("X-CVS-Binding"),
+    bindingRevision: response.headers.get("X-CVS-Binding-Revision"),
+    phase: "ready"
   });
   return blob;
 }
@@ -270,8 +357,18 @@ async function requestAudio(options) {
   options = annotatedOptions(options.segment, options);
   const pieces = paragraphSegments(options.segment);
   const offset = pieces.findIndex(item => item.index === options.segment.index);
-  const saved = await variantStore.selectedClip(paragraphKey(options.segment), offset, pieces.length);
-  if (saved) return saved;
+  const variantState = await variantStore.read(paragraphKey(options.segment));
+  const selectedVariant = variantState.versions.find(item => item.id === variantState.selected);
+  const saved = selectedVariant?.clips.length === pieces.length
+    ? selectedVariant.clips[offset] || null
+    : null;
+  if (saved) {
+    setSegmentProvenance(options.segment.index, {
+      ...(selectedVariant.metadata || {}),
+      phase: "cached"
+    });
+    return saved;
+  }
   const segmentId = bookSegmentIds[options.segment.index];
   if (currentBookId && segmentId) {
     const offline = await offlineLibrary.getClip(currentBookId, segmentId).catch(() => null);
@@ -290,7 +387,15 @@ async function requestAudio(options) {
     const response = await fetch(`/v1/books/${currentBookId}/audio/${segmentId}`, {
       credentials: "same-origin", signal: options.signal
     });
-    if (response.ok) return response.blob();
+    if (response.ok) {
+      setSegmentProvenance(options.segment.index, {
+        ...(metadata || {}),
+        voice: metadata?.voice || options.voice,
+        model: metadata?.model_id || options.modelId,
+        phase: "cached"
+      });
+      return response.blob();
+    }
     if (response.status !== 404) throw new Error(`书库音频请求失败：HTTP ${response.status}`);
   }
   return fetchFreshAudio(options);
@@ -369,6 +474,7 @@ async function renderVersions() {
     select.disabled = true;
     ui.selectVersion.disabled = true;
     ui.deleteVersion.disabled = true;
+    renderVersionProvenance(null);
     return;
   }
   const state = await variantStore.read(paragraphKey(position.segment));
@@ -385,6 +491,9 @@ async function renderVersions() {
   select.disabled = !state.versions.length;
   ui.selectVersion.disabled = !state.versions.length;
   ui.deleteVersion.disabled = !state.versions.length;
+  renderVersionProvenance(
+    state.versions.find(version => version.id === select.value) || null
+  );
 }
 
 function scrollToSegment(node, force = false) {
@@ -610,6 +719,7 @@ function render(snapshot = queue.snapshot) {
     : "";
   ui.status.textContent = statusOverride ||
     (loading ? "正在读取文件……" : messages[snapshot.state] + choiceLabel + provenanceLabel);
+  renderGenerationProvenance(index);
 }
 
 function showDocument(model, metadata, id, label) {
@@ -841,9 +951,19 @@ async function regenerateParagraph() {
         signal: controller.signal }));
     }
     if (controller !== regenerationController) return;
+    const provenance = generationProvenance.get(first) || {};
     await variantStore.add(paragraphKey(position.segment), clips, {
-      voice: options.voice, modelId: options.modelId,
-      referenceId: options.referenceId, speed: options.speed
+      voice: provenance.voice || options.voice,
+      modelId: options.modelId,
+      model: provenance.model || options.modelId,
+      engine: provenance.engine || null,
+      runtime: provenance.runtime || null,
+      runtimeRevision: provenance.runtimeRevision || null,
+      generationRevision: provenance.generationRevision || null,
+      binding: provenance.binding || null,
+      bindingRevision: provenance.bindingRevision || null,
+      referenceId: options.referenceId,
+      speed: options.speed
     });
   } catch (error) {
     if (error.name !== "AbortError") statusOverride = `段落生成失败：${error.message}`;
@@ -1362,6 +1482,14 @@ ui.stop.addEventListener("click", stopReading);
 ui.regenerateParagraph.addEventListener("click", regenerateParagraph);
 ui.previewSelection.addEventListener("click", previewSelection);
 ui.previewReference.addEventListener("click", previewReference);
+ui.paragraphVersions.addEventListener("change", async () => {
+  const position = activePosition();
+  if (!position) return renderVersionProvenance(null);
+  const state = await variantStore.read(paragraphKey(position.segment));
+  renderVersionProvenance(
+    state.versions.find(version => version.id === ui.paragraphVersions.value) || null
+  );
+});
 ui.selectVersion.addEventListener("click", selectParagraphVersion);
 ui.deleteVersion.addEventListener("click", deleteParagraphVersion);
 ui.previousSegment.addEventListener("click", () => jump(() => navigation.previousSegment()));
