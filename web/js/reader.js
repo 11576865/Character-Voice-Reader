@@ -36,6 +36,7 @@ const ui = {
   libraryToken: element("libraryToken"), loginLibrary: element("loginLibrary"),
   loadLibrary: element("loadLibrary"),
   saveBook: element("saveBook"), generateBook: element("generateBook"),
+  retryGeneration: element("retryGeneration"),
   continuousEmotion: element("continuousEmotion"),
   cancelGeneration: element("cancelGeneration"), libraryBooks: element("libraryBooks"),
   jobStatus: element("jobStatus"), downloadBook: element("downloadBook"),
@@ -1397,7 +1398,13 @@ async function pollJob() {
   if (!currentBookId) return;
   try {
     const job = await (await libraryFetch(`/v1/books/${currentBookId}/job`)).json();
-    ui.jobStatus.textContent = `生成：${job.status} · ${job.completed}/${job.total}${job.error ? ` · ${job.error}` : ""}`;
+    const failed = job.failed_segment;
+    const failedLabel = failed
+      ? ` · 失败位置：第 ${Number(failed.chapterIndex) + 1} 章，第 ${Number(failed.paragraphIndex) + 1} 段`
+      : "";
+    ui.jobStatus.textContent =
+      `生成：${job.status} · ${job.completed}/${job.total}${failedLabel}${job.error ? ` · ${job.error}` : ""}`;
+    ui.retryGeneration.disabled = !["failed", "interrupted", "cancelled"].includes(job.status);
     if (["queued", "running"].includes(job.status)) {
       clearTimeout(jobPoll);
       jobPoll = setTimeout(pollJob, 2500);
@@ -1435,6 +1442,20 @@ async function generateWholeBook() {
     await pollJob();
   } catch (error) {
     ui.jobStatus.textContent = `启动失败：${error.message}`;
+  }
+}
+
+async function retryWholeBook() {
+  if (!currentBookId) {
+    ui.jobStatus.textContent = "请先打开书库中的书籍。";
+    return;
+  }
+  try {
+    await libraryFetch(`/v1/books/${currentBookId}/retry`, { method: "POST" });
+    ui.jobStatus.textContent = "已重新排队；已有可复用音频会跳过。";
+    await pollJob();
+  } catch (error) {
+    ui.jobStatus.textContent = `重试失败：${error.message}`;
   }
 }
 
@@ -1521,6 +1542,7 @@ ui.refreshGenerationHistory.addEventListener("click", loadGenerationHistory);
 ui.loadLibrary.addEventListener("click", loadLibrary);
 ui.saveBook.addEventListener("click", saveCurrentBook);
 ui.generateBook.addEventListener("click", generateWholeBook);
+ui.retryGeneration.addEventListener("click", retryWholeBook);
 ui.suggestSpeakers.addEventListener("click", loadSpeakerSuggestions);
 ui.downloadBook.addEventListener("click", downloadWholeBook);
 ui.exportEpub.addEventListener("click", exportEpub);
