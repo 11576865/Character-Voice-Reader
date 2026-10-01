@@ -381,3 +381,101 @@ def test_cancel_wakes_paused_book_generation(tmp_path, monkeypatch):
 
     app_module.active_jobs.pop(book["id"], None)
     app_module.pause_jobs.pop(book["id"], None)
+
+
+def test_scoped_book_generation_supports_missing_and_chapter(tmp_path, monkeypatch):
+    fake = FakeCVS()
+    monkeypatch.setattr(app_module, "cvs", fake)
+    library = BookLibrary(tmp_path / "data")
+    monkeypatch.setattr(app_module, "library", library)
+    monkeypatch.setattr(app_module, "generation_ledger", FakeLedger())
+
+    document = {
+        "title": "Scoped",
+        "chapters": [
+            {"title": "One", "paragraphs": ["A.", "B."]},
+            {"title": "Two", "paragraphs": ["C."]},
+        ],
+    }
+    segments = [
+        {"chapterIndex": 0, "paragraphIndex": 0, "start": 0, "end": 2, "text": "A."},
+        {"chapterIndex": 0, "paragraphIndex": 1, "start": 0, "end": 2, "text": "B."},
+        {"chapterIndex": 1, "paragraphIndex": 0, "start": 0, "end": 2, "text": "C."},
+    ]
+    book = library.put_book(document, segments, kind="txt")
+
+    first = book["segments"][0]
+    library.add_version(
+        book["id"],
+        first["id"],
+        b"RIFF....WAVE",
+        {
+            "voice": "march-7th",
+            "model_alias": "local-v4",
+            "model_id": "march7-gsv-v4-a",
+            "generation_revision": "g" * 64,
+            "fingerprint": "existing",
+        },
+    )
+
+    missing = app_module._generation_segments(
+        book["id"],
+        book,
+        {"scope": "missing"},
+    )
+    assert [item["id"] for item in missing] == [
+        book["segments"][1]["id"],
+        book["segments"][2]["id"],
+    ]
+
+    chapter = app_module._generation_segments(
+        book["id"],
+        book,
+        {"scope": "chapter", "chapter_index": 1},
+    )
+    assert [item["id"] for item in chapter] == [book["segments"][2]["id"]]
+
+
+def test_generate_endpoint_accepts_chapter_scope(tmp_path, monkeypatch):
+    fake = FakeCVS()
+    monkeypatch.setattr(app_module, "cvs", fake)
+    library = BookLibrary(tmp_path / "data")
+    monkeypatch.setattr(app_module, "library", library)
+    monkeypatch.setattr(app_module, "generation_ledger", FakeLedger())
+
+    document = {
+        "title": "Chapter",
+        "chapters": [
+            {"title": "One", "paragraphs": ["A."]},
+            {"title": "Two", "paragraphs": ["B."]},
+        ],
+    }
+    segments = [
+        {"chapterIndex": 0, "paragraphIndex": 0, "start": 0, "end": 2, "text": "A."},
+        {"chapterIndex": 1, "paragraphIndex": 0, "start": 0, "end": 2, "text": "B."},
+    ]
+    book = library.put_book(document, segments, kind="txt")
+
+    class ImmediatePool:
+        def submit(self, fn, *args):
+            fn(*args)
+
+    monkeypatch.setattr(app_module, "generation_pool", ImmediatePool())
+
+    response = client.post(
+        f"/v1/books/{book['id']}/generate",
+        headers={"X-CVR-Token": app_module.ADMIN_TOKEN},
+        json={
+            "voice": "march-7th",
+            "model_id": "local-v4",
+            "reference_id": "neutral",
+            "speed": 1.0,
+            "continuous_emotion": False,
+            "scope": "chapter",
+            "chapter_index": 1,
+        },
+    )
+    assert response.status_code == 200
+    state = library.versions(book["id"])
+    assert book["segments"][0]["id"] not in state
+    assert book["segments"][1]["id"] in state
