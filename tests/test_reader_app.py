@@ -10,6 +10,39 @@ from reader_server.cvs_client import CVSError
 client = TestClient(app_module.app)
 
 
+class FakeLedger:
+    def __init__(self):
+        self.items = []
+
+    def append(self, **kwargs):
+        record = {
+            "id": f"g-{len(self.items) + 1}",
+            "createdAt": "2026-10-02T00:00:00+00:00",
+            "source": kwargs["source"],
+            "book_id": kwargs.get("book_id"),
+            "segment_id": kwargs.get("segment_id"),
+            "voice": kwargs["metadata"].get("voice"),
+            "model": kwargs["metadata"].get("model"),
+            "engine": kwargs["metadata"].get("engine"),
+            "runtime": kwargs["metadata"].get("runtime"),
+            "runtime_revision": kwargs["metadata"].get("runtime_revision"),
+            "generation_revision": kwargs["metadata"].get("generation_revision"),
+            "input_sha256": "i" * 64,
+            "output_sha256": "o" * 64,
+            "output_bytes": len(kwargs["audio"]),
+        }
+        self.items.append(record)
+        return record
+
+    def recent(self, *, limit=50, book_id=None, segment_id=None):
+        items = list(reversed(self.items))
+        if book_id is not None:
+            items = [item for item in items if item.get("book_id") == book_id]
+        if segment_id is not None:
+            items = [item for item in items if item.get("segment_id") == segment_id]
+        return items[:limit]
+
+
 class FakeCVS:
     def health(self):
         return {"status": "ok"}
@@ -81,6 +114,8 @@ def test_reader_root_and_health(monkeypatch):
 
 def test_voice_and_speech_are_cvs_contract_proxies(monkeypatch):
     monkeypatch.setattr(app_module, "cvs", FakeCVS())
+    ledger = FakeLedger()
+    monkeypatch.setattr(app_module, "generation_ledger", ledger)
     voices = client.get("/v1/voices")
     assert voices.status_code == 200
     assert voices.json()["voices"][0]["id"] == "march-7th"
@@ -99,6 +134,8 @@ def test_voice_and_speech_are_cvs_contract_proxies(monkeypatch):
     assert speech.headers["x-cvs-runtime"] == "gpt-sovits-local"
     assert speech.headers["x-cvs-runtime-revision"] == "r" * 64
     assert speech.headers["x-cvs-binding"] == "march-gpt"
+    assert ledger.items[0]["source"] == "interactive"
+    assert ledger.items[0]["runtime"] == "gpt-sovits-local"
 
 
 def test_generation_resolve_is_cvs_contract_proxy(monkeypatch):
@@ -137,6 +174,10 @@ def test_book_generation_persists_runtime_provenance(tmp_path, monkeypatch):
     monkeypatch.setattr(app_module, "cvs", fake)
     library = BookLibrary(tmp_path / "data")
     monkeypatch.setattr(app_module, "library", library)
+    ledger = FakeLedger()
+    monkeypatch.setattr(app_module, "generation_ledger", ledger)
+    ledger = FakeLedger()
+    monkeypatch.setattr(app_module, "generation_ledger", ledger)
 
     document = {"title": "Test", "chapters": [{"title": "One", "paragraphs": ["Hello."]}]}
     segments = [{
@@ -167,3 +208,33 @@ def test_book_generation_persists_runtime_provenance(tmp_path, monkeypatch):
     assert metadata["binding"] == "march-gpt"
     assert metadata["generation_revision"] == "g" * 64
     assert metadata["fingerprint"]
+
+
+def test_generation_history_endpoint_is_admin_protected(monkeypatch):
+    ledger = FakeLedger()
+    ledger.append(
+        source="interactive",
+        text="Hello",
+        audio=b"RIFF....WAVE",
+        metadata={
+            "voice": "march-7th",
+            "model": "march7-gsv-v4-a",
+            "engine": "gpt-sovits",
+            "runtime": "gpt-sovits-local",
+            "runtime_revision": "r" * 64,
+            "generation_revision": "g" * 64,
+        },
+    )
+    monkeypatch.setattr(app_module, "generation_ledger", ledger)
+
+    assert client.get("/v1/generation-history").status_code == 401
+    response = client.get(
+        "/v1/generation-history?limit=10",
+        headers={"X-CVR-Token": app_module.ADMIN_TOKEN},
+    )
+    assert response.status_code == 200
+    item = response.json()["items"][0]
+    assert item["engine"] == "gpt-sovits"
+    assert item["runtime"] == "gpt-sovits-local"
+    assert item["input_sha256"] == "i" * 64
+    assert item["output_sha256"] == "o" * 64
