@@ -394,6 +394,13 @@ details > summary {
   font-variant-numeric: tabular-nums;
 }
 
+#readingProgress {
+  width: 100%;
+  height: 6px;
+  margin-top: 8px;
+  accent-color: var(--accent);
+}
+
 .controls {
   display: flex;
   flex-wrap: wrap;
@@ -567,15 +574,18 @@ details > summary {
 }
 
 #readingPane {
+  --reader-line-height: 1.86;
+  --reader-width: 860px;
+  --reader-paragraph-gap: 1.15em;
   height: 72vh;
   overflow: auto;
   padding: clamp(22px, 4vw, 48px);
   scroll-behavior: smooth;
-  line-height: 1.86;
+  line-height: var(--reader-line-height);
 }
 
 #documentBody {
-  max-width: 860px;
+  max-width: var(--reader-width);
   margin: 0 auto;
 }
 
@@ -590,7 +600,7 @@ details > summary {
 }
 
 #readingPane p {
-  margin: 0 0 1.15em;
+  margin: 0 0 var(--reader-paragraph-gap);
   white-space: pre-wrap;
 }
 
