@@ -70,6 +70,7 @@ let voiceCatalog = new Map();
 const segmentNodes = new Map();
 const chapterButtons = [];
 const selectedReferences = new Map();
+const generationProvenance = new Map();
 let regenerationController = null;
 let versionRenderSerial = 0;
 let currentBookId = null;
@@ -254,6 +255,13 @@ async function fetchFreshAudio({ segment, voice, modelId, referenceId, speed, si
   selectedReferences.set(segment.index, {
     id: response.headers.get("X-Selected-Reference"),
     reason: response.headers.get("X-Reference-Reason")
+  });
+  generationProvenance.set(segment.index, {
+    engine: response.headers.get("X-CVS-Engine"),
+    runtime: response.headers.get("X-CVS-Runtime"),
+    runtimeRevision: response.headers.get("X-CVS-Runtime-Revision"),
+    model: response.headers.get("X-CVS-Model"),
+    generationRevision: response.headers.get("X-CVS-Generation-Revision")
   });
   return blob;
 }
@@ -596,7 +604,12 @@ function render(snapshot = queue.snapshot) {
   const choice = selectedReferences.get(index);
   const choiceLabel = choice?.id && ui.referenceId.value === "auto"
     ? ` · 参考：${choice.id}（${choice.reason || "自动"}）` : "";
-  ui.status.textContent = statusOverride || (loading ? "正在读取文件……" : messages[snapshot.state] + choiceLabel);
+  const provenance = generationProvenance.get(index);
+  const provenanceLabel = provenance?.engine
+    ? ` · 引擎：${provenance.engine}${provenance.runtime ? ` · Runtime：${provenance.runtime}` : ""}`
+    : "";
+  ui.status.textContent = statusOverride ||
+    (loading ? "正在读取文件……" : messages[snapshot.state] + choiceLabel + provenanceLabel);
 }
 
 function showDocument(model, metadata, id, label) {
@@ -620,6 +633,7 @@ function showDocument(model, metadata, id, label) {
   sourceLabel = label;
   segments = segmentDocument(model);
   selectedReferences.clear();
+  generationProvenance.clear();
   pendingProgress = id ? progressStore.load(id, model, segments) : null;
   stoppedPosition = null;
   jumpSavedIndex = -1;
