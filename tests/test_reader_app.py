@@ -294,3 +294,90 @@ def test_failed_book_generation_can_be_retried(tmp_path, monkeypatch):
     assert job["error"] is None
     state = library.versions(book["id"])
     assert book["segments"][0]["id"] in state
+
+
+def test_book_generation_can_pause_and_resume(tmp_path, monkeypatch):
+    fake = FakeCVS()
+    monkeypatch.setattr(app_module, "cvs", fake)
+    library = BookLibrary(tmp_path / "data")
+    monkeypatch.setattr(app_module, "library", library)
+    monkeypatch.setattr(app_module, "generation_ledger", FakeLedger())
+
+    document = {
+        "title": "Pause",
+        "chapters": [{"title": "One", "paragraphs": ["Hello.", "World."]}],
+    }
+    segments = [
+        {"chapterIndex": 0, "paragraphIndex": 0, "start": 0, "end": 6, "text": "Hello."},
+        {"chapterIndex": 0, "paragraphIndex": 1, "start": 0, "end": 6, "text": "World."},
+    ]
+    book = library.put_book(document, segments, kind="txt")
+
+    cancel = __import__("threading").Event()
+    pause = __import__("threading").Event()
+    app_module.active_jobs[book["id"]] = cancel
+    app_module.pause_jobs[book["id"]] = pause
+    library.set_job(book["id"], {
+        "status": "running",
+        "completed": 0,
+        "total": 2,
+        "settings": {
+            "voice": "march-7th",
+            "model_id": "local-v4",
+            "reference_id": "neutral",
+            "speed": 1.0,
+            "continuous_emotion": False,
+        },
+        "updatedAt": "2026-10-02T00:00:00+00:00",
+        "error": None,
+        "current_segment": None,
+        "failed_segment": None,
+    })
+
+    pause_response = client.post(
+        f"/v1/books/{book['id']}/pause",
+        headers={"X-CVR-Token": app_module.ADMIN_TOKEN},
+    )
+    assert pause_response.status_code == 200
+    assert pause.is_set()
+    assert library.job(book["id"])["status"] == "pausing"
+
+    resume_response = client.post(
+        f"/v1/books/{book['id']}/resume",
+        headers={"X-CVR-Token": app_module.ADMIN_TOKEN},
+    )
+    assert resume_response.status_code == 200
+    assert not pause.is_set()
+    assert library.job(book["id"])["status"] == "running"
+
+    app_module.active_jobs.pop(book["id"], None)
+    app_module.pause_jobs.pop(book["id"], None)
+
+
+def test_cancel_wakes_paused_book_generation(tmp_path, monkeypatch):
+    library = BookLibrary(tmp_path / "data")
+    monkeypatch.setattr(app_module, "library", library)
+
+    document = {"title": "Cancel", "chapters": [{"title": "One", "paragraphs": ["Hello."]}]}
+    segments = [{
+        "chapterIndex": 0, "paragraphIndex": 0,
+        "start": 0, "end": 6, "text": "Hello.",
+    }]
+    book = library.put_book(document, segments, kind="txt")
+
+    cancel = __import__("threading").Event()
+    pause = __import__("threading").Event()
+    pause.set()
+    app_module.active_jobs[book["id"]] = cancel
+    app_module.pause_jobs[book["id"]] = pause
+
+    response = client.post(
+        f"/v1/books/{book['id']}/cancel",
+        headers={"X-CVR-Token": app_module.ADMIN_TOKEN},
+    )
+    assert response.status_code == 200
+    assert cancel.is_set()
+    assert not pause.is_set()
+
+    app_module.active_jobs.pop(book["id"], None)
+    app_module.pause_jobs.pop(book["id"], None)
