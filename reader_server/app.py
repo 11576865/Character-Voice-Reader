@@ -64,6 +64,8 @@ class GenerationRequest(BaseModel):
     reference_id: str | None = None
     speed: float = 1.0
     continuous_emotion: bool = False
+    scope: str = "all"
+    chapter_index: int | None = None
 
 
 class SelectionRequest(BaseModel):
@@ -439,6 +441,27 @@ def select_book_version(book_id: str, segment_id: str, request: SelectionRequest
     return {"selected": request.version_id}
 
 
+def _generation_segments(book_id: str, book: dict, settings: dict) -> list[dict]:
+    scope = settings.get("scope") or "all"
+    segments = list(book["segments"])
+    if scope == "missing":
+        return [
+            segment for segment in segments
+            if library.audio_path(book_id, segment["id"]) is None
+        ]
+    if scope == "chapter":
+        chapter_index = settings.get("chapter_index")
+        if not isinstance(chapter_index, int) or chapter_index < 0:
+            raise ValueError("chapter_index is required for chapter generation")
+        return [
+            segment for segment in segments
+            if segment["chapterIndex"] == chapter_index
+        ]
+    if scope != "all":
+        raise ValueError(f"Unsupported generation scope: {scope}")
+    return segments
+
+
 def _generate_book(
     book_id: str,
     settings: dict,
@@ -446,7 +469,8 @@ def _generate_book(
     pause: threading.Event,
 ):
     book = library.get_book(book_id)
-    total = len(book["segments"])
+    target_segments = _generation_segments(book_id, book, settings)
+    total = len(target_segments)
     job = {
         "status": "running", "completed": 0, "total": total,
         "error": None, "settings": settings, "updatedAt": _now_iso(),
@@ -459,7 +483,7 @@ def _generate_book(
     }
     try:
         voice_map = _voice_map()
-        for segment in book["segments"]:
+        for segment in target_segments:
             while pause.is_set() and not cancel.is_set():
                 if job.get("status") != "paused":
                     job["status"] = "paused"
@@ -642,11 +666,19 @@ def _now_iso():
 
 @app.post("/v1/books/{book_id}/generate", dependencies=[Depends(require_admin)])
 def generate_book(book_id: str, request: GenerationRequest):
-    get_book_or_404(book_id)
+    book = get_book_or_404(book_id)
     if request.speed <= 0:
         raise HTTPException(status_code=400, detail="Speed must be positive")
     if request.voice not in _voice_map():
         raise HTTPException(status_code=404, detail="Voice is unavailable")
+    if request.scope not in {"all", "missing", "chapter"}:
+        raise HTTPException(status_code=400, detail="Unsupported generation scope")
+    if request.scope == "chapter":
+        if request.chapter_index is None or request.chapter_index < 0:
+            raise HTTPException(status_code=400, detail="chapter_index is required")
+        chapter_count = len(book.get("document", {}).get("chapters", []))
+        if request.chapter_index >= chapter_count:
+            raise HTTPException(status_code=400, detail="chapter_index is out of range")
     with jobs_lock:
         if book_id in active_jobs:
             raise HTTPException(status_code=409, detail="Book generation already running")
@@ -655,9 +687,13 @@ def generate_book(book_id: str, request: GenerationRequest):
         active_jobs[book_id] = cancel
         pause_jobs[book_id] = pause
     settings = request.model_dump()
+    try:
+        target_total = len(_generation_segments(book_id, book, settings))
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
     library.set_job(book_id, {
         "status": "queued", "completed": 0,
-        "total": len(get_book_or_404(book_id)["segments"]),
+        "total": target_total,
         "settings": settings, "updatedAt": _now_iso(), "error": None,
         "current_segment": None, "failed_segment": None,
     })
@@ -685,10 +721,15 @@ def retry_book_job(book_id: str):
         active_jobs[book_id] = cancel
         pause_jobs[book_id] = pause
 
+    book = get_book_or_404(book_id)
+    try:
+        target_total = len(_generation_segments(book_id, book, settings))
+    except ValueError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
     library.set_job(book_id, {
         "status": "queued",
         "completed": 0,
-        "total": len(get_book_or_404(book_id)["segments"]),
+        "total": target_total,
         "settings": settings,
         "updatedAt": _now_iso(),
         "error": None,
