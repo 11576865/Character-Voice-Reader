@@ -49,7 +49,9 @@ const ui = {
   addBookmark: element("addBookmark"), bookmarkList: element("bookmarkList"),
   goBookmark: element("goBookmark"), searchText: element("searchText"),
   searchNext: element("searchNext"), fontSize: element("fontSize"),
-  theme: element("theme"), sleepMinutes: element("sleepMinutes")
+  theme: element("theme"), sleepMinutes: element("sleepMinutes"),
+  refreshGenerationHistory: element("refreshGenerationHistory"),
+  generationHistory: element("generationHistory")
 };
 
 const progressStore = new ProgressStore();
@@ -216,6 +218,55 @@ async function libraryFetch(url, options = {}) {
   return response;
 }
 
+function renderGenerationHistory(items) {
+  ui.generationHistory.replaceChildren();
+  if (!items.length) {
+    ui.generationHistory.textContent = "还没有生成记录。";
+    return;
+  }
+  for (const item of items) {
+    const card = document.createElement("div");
+    card.className = "generation-history-item";
+
+    const title = document.createElement("strong");
+    const scope = item.source === "book" ? "整书生成" : "即时生成";
+    title.textContent = `${scope} · ${item.voice || "未知角色"} · ${item.engine || "未知引擎"}`;
+
+    const meta = document.createElement("div");
+    meta.className = "generation-history-meta";
+    const created = item.createdAt ? new Date(item.createdAt).toLocaleString() : "未知时间";
+    const model = item.model || "未记录";
+    const runtime = item.runtime || "未记录";
+    meta.textContent = `${created} · Model ${model} · Runtime ${runtime} · ${item.output_bytes || 0} bytes`;
+
+    const revisions = document.createElement("div");
+    revisions.className = "generation-history-meta";
+    revisions.textContent =
+      `Runtime rev ${shortRevision(item.runtime_revision)} · Generation rev ${shortRevision(item.generation_revision)}`;
+
+    const hashes = document.createElement("div");
+    hashes.className = "generation-history-hash";
+    hashes.textContent =
+      `Input ${shortRevision(item.input_sha256)} · Output ${shortRevision(item.output_sha256)}`;
+
+    card.append(title, meta, revisions, hashes);
+    ui.generationHistory.appendChild(card);
+  }
+}
+
+async function loadGenerationHistory() {
+  try {
+    const endpoint = currentBookId
+      ? `/v1/books/${currentBookId}/generation-history?limit=30`
+      : "/v1/generation-history?limit=30";
+    const response = await libraryFetch(endpoint);
+    const payload = await response.json();
+    renderGenerationHistory(payload.items || []);
+  } catch (error) {
+    ui.generationHistory.textContent = `生成历史不可用：${error.message}`;
+  }
+}
+
 async function loginLibrary() {
   try {
     const response = await fetch("/v1/session", {
@@ -226,6 +277,7 @@ async function loginLibrary() {
     ui.libraryToken.value = "";
     ui.jobStatus.textContent = "书库已登录。";
     await loadLibrary();
+    await loadGenerationHistory();
     await syncOfflineChanges();
   } catch (error) { ui.jobStatus.textContent = `登录失败：${error.message}`; }
 }
@@ -1300,6 +1352,7 @@ async function openBook(bookId) {
       render();
     }
     await pollJob();
+    await loadGenerationHistory();
   } catch (error) {
     ui.jobStatus.textContent = `打开失败：${error.message}`;
   }
@@ -1463,6 +1516,7 @@ ui.sleepMinutes.addEventListener("change", () => {
   }, minutes * 60000);
 });
 ui.loginLibrary.addEventListener("click", loginLibrary);
+ui.refreshGenerationHistory.addEventListener("click", loadGenerationHistory);
 ui.loadLibrary.addEventListener("click", loadLibrary);
 ui.saveBook.addEventListener("click", saveCurrentBook);
 ui.generateBook.addEventListener("click", generateWholeBook);
