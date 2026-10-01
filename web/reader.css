@@ -687,6 +687,37 @@ details > summary {
   font-size: .76rem;
 }
 
+.generation-history {
+  display: grid;
+  gap: 8px;
+  margin-top: 10px;
+  color: var(--muted);
+  font-size: .72rem;
+}
+
+.generation-history-item {
+  padding: 9px 10px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--panel-soft);
+}
+
+.generation-history-item strong {
+  color: var(--text);
+}
+
+.generation-history-meta {
+  margin-top: 3px;
+  line-height: 1.55;
+}
+
+.generation-history-hash {
+  margin-top: 4px;
+  overflow-wrap: anywhere;
+  font-family: ui-monospace, SFMono-Regular, Consolas, monospace;
+  color: var(--muted);
+}
+
 .subheading {
   margin: 14px 0 4px;
   color: var(--muted);
