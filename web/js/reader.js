@@ -36,6 +36,7 @@ const ui = {
   libraryToken: element("libraryToken"), loginLibrary: element("loginLibrary"),
   loadLibrary: element("loadLibrary"),
   saveBook: element("saveBook"), generateBook: element("generateBook"),
+  pauseGeneration: element("pauseGeneration"), resumeGeneration: element("resumeGeneration"),
   retryGeneration: element("retryGeneration"),
   continuousEmotion: element("continuousEmotion"),
   cancelGeneration: element("cancelGeneration"), libraryBooks: element("libraryBooks"),
@@ -1405,6 +1406,9 @@ async function pollJob() {
     ui.jobStatus.textContent =
       `生成：${job.status} · ${job.completed}/${job.total}${failedLabel}${job.error ? ` · ${job.error}` : ""}`;
     ui.retryGeneration.disabled = !["failed", "interrupted", "cancelled"].includes(job.status);
+    ui.pauseGeneration.disabled = !["queued", "running"].includes(job.status);
+    ui.resumeGeneration.disabled = !["paused", "pausing"].includes(job.status);
+    ui.cancelGeneration.disabled = !["queued", "running", "paused", "pausing"].includes(job.status);
     if (["queued", "running"].includes(job.status)) {
       clearTimeout(jobPoll);
       jobPoll = setTimeout(pollJob, 2500);
@@ -1442,6 +1446,34 @@ async function generateWholeBook() {
     await pollJob();
   } catch (error) {
     ui.jobStatus.textContent = `启动失败：${error.message}`;
+  }
+}
+
+async function pauseWholeBook() {
+  if (!currentBookId) {
+    ui.jobStatus.textContent = "请先打开书库中的书籍。";
+    return;
+  }
+  try {
+    await libraryFetch(`/v1/books/${currentBookId}/pause`, { method: "POST" });
+    ui.jobStatus.textContent = "将在当前片段完成后暂停生成。";
+    await pollJob();
+  } catch (error) {
+    ui.jobStatus.textContent = `暂停失败：${error.message}`;
+  }
+}
+
+async function resumeWholeBook() {
+  if (!currentBookId) {
+    ui.jobStatus.textContent = "请先打开书库中的书籍。";
+    return;
+  }
+  try {
+    await libraryFetch(`/v1/books/${currentBookId}/resume`, { method: "POST" });
+    ui.jobStatus.textContent = "已继续生成。";
+    await pollJob();
+  } catch (error) {
+    ui.jobStatus.textContent = `继续失败：${error.message}`;
   }
 }
 
@@ -1542,6 +1574,8 @@ ui.refreshGenerationHistory.addEventListener("click", loadGenerationHistory);
 ui.loadLibrary.addEventListener("click", loadLibrary);
 ui.saveBook.addEventListener("click", saveCurrentBook);
 ui.generateBook.addEventListener("click", generateWholeBook);
+ui.pauseGeneration.addEventListener("click", pauseWholeBook);
+ui.resumeGeneration.addEventListener("click", resumeWholeBook);
 ui.retryGeneration.addEventListener("click", retryWholeBook);
 ui.suggestSpeakers.addEventListener("click", loadSpeakerSuggestions);
 ui.downloadBook.addEventListener("click", downloadWholeBook);
