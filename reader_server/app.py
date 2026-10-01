@@ -66,6 +66,7 @@ class GenerationRequest(BaseModel):
     continuous_emotion: bool = False
     scope: str = "all"
     chapter_index: int | None = None
+    paragraph_index: int | None = None
 
 
 class SelectionRequest(BaseModel):
@@ -457,6 +458,21 @@ def _generation_segments(book_id: str, book: dict, settings: dict) -> list[dict]
             segment for segment in segments
             if segment["chapterIndex"] == chapter_index
         ]
+    if scope == "paragraph":
+        chapter_index = settings.get("chapter_index")
+        paragraph_index = settings.get("paragraph_index")
+        if (
+            not isinstance(chapter_index, int) or chapter_index < 0
+            or not isinstance(paragraph_index, int) or paragraph_index < 0
+        ):
+            raise ValueError(
+                "chapter_index and paragraph_index are required for paragraph generation"
+            )
+        return [
+            segment for segment in segments
+            if segment["chapterIndex"] == chapter_index
+            and segment["paragraphIndex"] == paragraph_index
+        ]
     if scope != "all":
         raise ValueError(f"Unsupported generation scope: {scope}")
     return segments
@@ -671,7 +687,7 @@ def generate_book(book_id: str, request: GenerationRequest):
         raise HTTPException(status_code=400, detail="Speed must be positive")
     if request.voice not in _voice_map():
         raise HTTPException(status_code=404, detail="Voice is unavailable")
-    if request.scope not in {"all", "missing", "chapter"}:
+    if request.scope not in {"all", "missing", "chapter", "paragraph"}:
         raise HTTPException(status_code=400, detail="Unsupported generation scope")
     if request.scope == "chapter":
         if request.chapter_index is None or request.chapter_index < 0:
@@ -679,6 +695,21 @@ def generate_book(book_id: str, request: GenerationRequest):
         chapter_count = len(book.get("document", {}).get("chapters", []))
         if request.chapter_index >= chapter_count:
             raise HTTPException(status_code=400, detail="chapter_index is out of range")
+    if request.scope == "paragraph":
+        if (
+            request.chapter_index is None or request.chapter_index < 0
+            or request.paragraph_index is None or request.paragraph_index < 0
+        ):
+            raise HTTPException(
+                status_code=400,
+                detail="chapter_index and paragraph_index are required",
+            )
+        chapters = book.get("document", {}).get("chapters", [])
+        if request.chapter_index >= len(chapters):
+            raise HTTPException(status_code=400, detail="chapter_index is out of range")
+        paragraphs = chapters[request.chapter_index].get("paragraphs", [])
+        if request.paragraph_index >= len(paragraphs):
+            raise HTTPException(status_code=400, detail="paragraph_index is out of range")
     with jobs_lock:
         if book_id in active_jobs:
             raise HTTPException(status_code=409, detail="Book generation already running")
