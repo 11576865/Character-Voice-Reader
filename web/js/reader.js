@@ -36,6 +36,7 @@ const ui = {
   libraryToken: element("libraryToken"), loginLibrary: element("loginLibrary"),
   loadLibrary: element("loadLibrary"),
   saveBook: element("saveBook"), generateBook: element("generateBook"),
+  generateMissing: element("generateMissing"), generateChapter: element("generateChapter"),
   pauseGeneration: element("pauseGeneration"), resumeGeneration: element("resumeGeneration"),
   retryGeneration: element("retryGeneration"),
   continuousEmotion: element("continuousEmotion"),
@@ -1430,23 +1431,55 @@ async function refreshBookVersions() {
   }
 }
 
-async function generateWholeBook() {
+async function startBookGeneration(scope = "all") {
   if (!currentBookId) {
     ui.jobStatus.textContent = "请先把当前书籍保存到书库。";
     return;
   }
   try {
     const options = playbackOptions();
+    const position = activePosition();
+    const payload = {
+      voice: options.voice,
+      model_id: options.modelId,
+      reference_id: options.referenceId,
+      speed: options.speed,
+      continuous_emotion: ui.continuousEmotion.checked,
+      scope
+    };
+    if (scope === "chapter") {
+      if (!position) {
+        ui.jobStatus.textContent = "当前没有可生成的章节。";
+        return;
+      }
+      payload.chapter_index = position.segment.chapterIndex;
+    }
     await libraryFetch(`/v1/books/${currentBookId}/generate`, {
-      method: "POST", headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ voice: options.voice, model_id: options.modelId,
-        reference_id: options.referenceId, speed: options.speed,
-        continuous_emotion: ui.continuousEmotion.checked })
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(payload)
     });
+    if (scope === "missing") {
+      ui.jobStatus.textContent = "已开始检查并生成缺失段落。";
+    } else if (scope === "chapter") {
+      ui.jobStatus.textContent = `已开始生成第 ${position.segment.chapterIndex + 1} 章。`;
+    }
     await pollJob();
   } catch (error) {
     ui.jobStatus.textContent = `启动失败：${error.message}`;
   }
+}
+
+async function generateWholeBook() {
+  return startBookGeneration("all");
+}
+
+async function generateMissingAudio() {
+  return startBookGeneration("missing");
+}
+
+async function generateCurrentChapter() {
+  return startBookGeneration("chapter");
 }
 
 async function pauseWholeBook() {
@@ -1574,6 +1607,8 @@ ui.refreshGenerationHistory.addEventListener("click", loadGenerationHistory);
 ui.loadLibrary.addEventListener("click", loadLibrary);
 ui.saveBook.addEventListener("click", saveCurrentBook);
 ui.generateBook.addEventListener("click", generateWholeBook);
+ui.generateMissing.addEventListener("click", generateMissingAudio);
+ui.generateChapter.addEventListener("click", generateCurrentChapter);
 ui.pauseGeneration.addEventListener("click", pauseWholeBook);
 ui.resumeGeneration.addEventListener("click", resumeWholeBook);
 ui.retryGeneration.addEventListener("click", retryWholeBook);
