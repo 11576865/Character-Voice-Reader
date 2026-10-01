@@ -444,6 +444,7 @@ def _generate_book(book_id: str, settings: dict, cancel: threading.Event):
     job = {
         "status": "running", "completed": 0, "total": total,
         "error": None, "settings": settings, "updatedAt": _now_iso(),
+        "current_segment": None, "failed_segment": None,
     }
     library.set_job(book_id, job)
     continuity = {
@@ -456,6 +457,16 @@ def _generate_book(book_id: str, settings: dict, cancel: threading.Event):
             if cancel.is_set():
                 job["status"] = "cancelled"
                 break
+
+            current_segment = {
+                "id": segment["id"],
+                "index": segment["index"],
+                "chapterIndex": segment["chapterIndex"],
+                "paragraphIndex": segment["paragraphIndex"],
+            }
+            job["current_segment"] = current_segment
+            job["updatedAt"] = _now_iso()
+            library.set_job(book_id, job)
 
             override = book.get("annotations", {}).get(
                 f"{segment['chapterIndex']}:{segment['paragraphIndex']}", {}
@@ -592,9 +603,11 @@ def _generate_book(book_id: str, settings: dict, cancel: threading.Event):
 
         if job["status"] == "running":
             job["status"] = "completed"
+            job["current_segment"] = None
     except Exception as exc:
         job["status"] = "failed"
         job["error"] = str(exc)
+        job["failed_segment"] = job.get("current_segment")
     finally:
         job["updatedAt"] = _now_iso()
         try:
@@ -625,9 +638,47 @@ def generate_book(book_id: str, request: GenerationRequest):
         "status": "queued", "completed": 0,
         "total": len(get_book_or_404(book_id)["segments"]),
         "settings": settings, "updatedAt": _now_iso(), "error": None,
+        "current_segment": None, "failed_segment": None,
     })
     generation_pool.submit(_generate_book, book_id, settings, cancel)
     return {"status": "queued", "book_id": book_id}
+
+
+@app.post("/v1/books/{book_id}/retry", dependencies=[Depends(require_admin)])
+def retry_book_job(book_id: str):
+    get_book_or_404(book_id)
+    previous = library.job(book_id)
+    if previous.get("status") not in {"failed", "interrupted", "cancelled"}:
+        raise HTTPException(status_code=409, detail="Book generation is not retryable")
+    settings = previous.get("settings")
+    if not isinstance(settings, dict) or not settings.get("voice"):
+        raise HTTPException(status_code=409, detail="Previous generation settings are unavailable")
+    if settings["voice"] not in _voice_map():
+        raise HTTPException(status_code=404, detail="Voice is unavailable")
+
+    with jobs_lock:
+        if book_id in active_jobs:
+            raise HTTPException(status_code=409, detail="Book generation already running")
+        cancel = threading.Event()
+        active_jobs[book_id] = cancel
+
+    library.set_job(book_id, {
+        "status": "queued",
+        "completed": 0,
+        "total": len(get_book_or_404(book_id)["segments"]),
+        "settings": settings,
+        "updatedAt": _now_iso(),
+        "error": None,
+        "current_segment": None,
+        "failed_segment": previous.get("failed_segment"),
+        "retry_of_updatedAt": previous.get("updatedAt"),
+    })
+    generation_pool.submit(_generate_book, book_id, settings, cancel)
+    return {
+        "status": "queued",
+        "book_id": book_id,
+        "retrying_segment": previous.get("failed_segment"),
+    }
 
 
 @app.get("/v1/books/{book_id}/job", dependencies=[Depends(require_admin)])
