@@ -1403,6 +1403,7 @@ async function pollJob() {
       jobPoll = setTimeout(pollJob, 2500);
     } else if (job.status === "completed") {
       await refreshBookVersions();
+      await loadGenerationHistory();
     }
   } catch (error) {
     ui.jobStatus.textContent = `任务查询失败：${error.message}`;
