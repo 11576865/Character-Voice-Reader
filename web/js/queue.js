@@ -7,24 +7,32 @@ export class ReaderQueue {
     this.requests = new Set();
     this.segments = [];
     this.index = 0;
-    this.nextAudio = null;
+    this.prefetchedAudio = new Map();
+    this.prefetchPromises = new Map();
+    this.prefetchTail = Promise.resolve();
+    // Compatibility/debug handle: promise for the immediate next segment.
     this.prefetchPromise = null;
+    this.nextAudio = null;
     this.voice = null;
     this.modelId = null;
     this.referenceId = null;
     this.speed = 1;
+    this.prefetchAhead = 1;
     this.state = "idle";
     this.error = null;
   }
 
   get snapshot() {
+    const next = this.prefetchedAudio.get(this.index + 1);
     return {
       state: this.state,
       index: this.index,
       total: this.segments.length,
       currentSegment: this.segments[this.index] || null,
       nextSegment: this.segments[this.index + 1] || null,
-      prefetchReady: Boolean(this.nextAudio),
+      prefetchReady: Boolean(next?.blob),
+      prefetchCount: [...this.prefetchedAudio.values()].filter(item => item?.blob).length,
+      prefetchAhead: this.prefetchAhead,
       error: this.error
     };
   }
@@ -46,8 +54,11 @@ export class ReaderQueue {
     for (const controller of this.requests) controller.abort();
     this.requests.clear();
     this.player.stop();
-    this.nextAudio = null;
+    this.prefetchedAudio.clear();
+    this.prefetchPromises.clear();
+    this.prefetchTail = Promise.resolve();
     this.prefetchPromise = null;
+    this.nextAudio = null;
     this.segments = [];
     this.index = 0;
     this.error = null;
@@ -71,17 +82,50 @@ export class ReaderQueue {
     }
   }
 
-  #prefetch(session) {
-    const nextIndex = this.index + 1;
-    if (nextIndex >= this.segments.length) return;
-    this.prefetchPromise = this.#fetch(nextIndex, session)
-      .then(blob => {
+  #queuePrefetch(index, session) {
+    if (index >= this.segments.length) return null;
+    if (this.prefetchedAudio.has(index)) {
+      return Promise.resolve(this.prefetchedAudio.get(index));
+    }
+    if (this.prefetchPromises.has(index)) return this.prefetchPromises.get(index);
+
+    const promise = this.prefetchTail.then(async () => {
+      if (session !== this.session) return null;
+      try {
+        const blob = await this.#fetch(index, session);
         if (session !== this.session || !blob) return null;
-        this.nextAudio = { index: nextIndex, blob };
+        const item = { index, blob };
+        this.prefetchedAudio.set(index, item);
+        if (index === this.index + 1) this.nextAudio = item;
         this.#notify();
-        return this.nextAudio;
-      })
-      .catch(error => ({ index: nextIndex, error }));
+        return item;
+      } catch (error) {
+        if (session !== this.session) return null;
+        const item = { index, error };
+        this.prefetchedAudio.set(index, item);
+        this.#notify();
+        return item;
+      } finally {
+        this.prefetchPromises.delete(index);
+      }
+    });
+
+    this.prefetchPromises.set(index, promise);
+    // Serialize TTS work so a larger lookahead does not fan out concurrent
+    // model requests or trigger competing runtime switches.
+    this.prefetchTail = promise.then(() => undefined, () => undefined);
+    return promise;
+  }
+
+  #prefetch(session) {
+    const end = Math.min(
+      this.segments.length - 1,
+      this.index + this.prefetchAhead
+    );
+    for (let index = this.index + 1; index <= end; index += 1) {
+      this.#queuePrefetch(index, session);
+    }
+    this.prefetchPromise = this.prefetchPromises.get(this.index + 1) || null;
   }
 
   async #play(blob, session, audioTime = 0) {
@@ -103,10 +147,24 @@ export class ReaderQueue {
     this.#setState("stopped", error);
   }
 
-  async start(segments, { voice, modelId = null, referenceId = null, speed = 1, startIndex = 0, audioTime = 0 }) {
+  async start(
+    segments,
+    {
+      voice,
+      modelId = null,
+      referenceId = null,
+      speed = 1,
+      prefetchAhead = 1,
+      startIndex = 0,
+      audioTime = 0
+    }
+  ) {
     if (!Array.isArray(segments) || segments.length === 0) throw new Error("没有可朗读的片段。");
     if (!voice) throw new Error("请选择角色。");
     if (!Number.isFinite(speed) || speed <= 0) throw new Error("速度必须大于 0。");
+    if (!Number.isInteger(prefetchAhead) || prefetchAhead < 0 || prefetchAhead > 4) {
+      throw new Error("预生成段数必须是 0 到 4 的整数。");
+    }
     if (!Number.isInteger(startIndex) || startIndex < 0 || startIndex >= segments.length) {
       throw new Error("起始片段越界。");
     }
@@ -117,6 +175,7 @@ export class ReaderQueue {
     this.modelId = modelId || null;
     this.referenceId = referenceId || null;
     this.speed = speed;
+    this.prefetchAhead = prefetchAhead;
     const session = this.session;
     this.#setState("generating");
     try {
@@ -133,23 +192,31 @@ export class ReaderQueue {
     this.index += 1;
     if (this.index >= this.segments.length) {
       this.player.stop();
-      this.nextAudio = null;
+      this.prefetchedAudio.clear();
+      this.prefetchPromises.clear();
       this.prefetchPromise = null;
+      this.nextAudio = null;
       this.#setState("finished");
       return;
     }
-    let next = this.nextAudio;
+
+    let next = this.prefetchedAudio.get(this.index);
     if (!next) {
       this.#setState("generating");
-      next = this.prefetchPromise ? await this.prefetchPromise : null;
+      const pending = this.prefetchPromises.get(this.index) ||
+        this.#queuePrefetch(this.index, session);
+      next = pending ? await pending : null;
     }
     if (session !== this.session) return;
     if (!next || next.error || next.index !== this.index) {
       this.#fail(next?.error || new Error("下一段预取失败。"));
       return;
     }
-    this.nextAudio = null;
-    this.prefetchPromise = null;
+
+    this.prefetchedAudio.delete(this.index);
+    this.prefetchPromises.delete(this.index);
+    this.nextAudio = this.prefetchedAudio.get(this.index + 1) || null;
+    this.prefetchPromise = this.prefetchPromises.get(this.index + 1) || null;
     await this.#play(next.blob, session);
   }
 
