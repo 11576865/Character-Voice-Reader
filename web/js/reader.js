@@ -132,10 +132,17 @@ function renderVersionProvenance(version) {
   const runtimeRevision = shortRevision(
     metadata.runtime_revision || metadata.runtimeRevision
   );
-  ui.versionProvenance.innerHTML =
-    `<strong>${engine}</strong> · Runtime ${runtime}<br>` +
-    `Runtime revision ${runtimeRevision} · Generation revision ${generationRevision}<br>` +
-    `生成于 ${new Date(version.createdAt).toLocaleString()}`;
+  ui.versionProvenance.replaceChildren();
+  const first = document.createElement("div");
+  const strong = document.createElement("strong");
+  strong.textContent = engine;
+  first.append(strong, ` · Runtime ${runtime}`);
+  const second = document.createElement("div");
+  second.textContent =
+    `Runtime revision ${runtimeRevision} · Generation revision ${generationRevision}`;
+  const third = document.createElement("div");
+  third.textContent = `生成于 ${new Date(version.createdAt).toLocaleString()}`;
+  ui.versionProvenance.append(first, second, third);
 }
 let regenerationController = null;
 let versionRenderSerial = 0;
@@ -381,7 +388,8 @@ async function requestAudio(options) {
   const expectedReference = options.referenceId || voiceCatalog.get(options.voice)?.default_reference;
   const versionMatches = metadata?.pronunciationsUpdatedAt === pronunciationsUpdatedAt &&
     metadata?.voice === options.voice &&
-    (!options.modelId || metadata.model_id === options.modelId) &&
+    (!options.modelId || metadata.model_alias === options.modelId ||
+      metadata.model_id === options.modelId) &&
     (expectedReference === "auto" || !expectedReference || metadata.reference_id === expectedReference);
   if (currentBookId && segmentId && versionMatches) {
     const response = await fetch(`/v1/books/${currentBookId}/audio/${segmentId}`, {
