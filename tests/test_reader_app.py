@@ -480,3 +480,48 @@ def test_generate_endpoint_accepts_chapter_scope(tmp_path, monkeypatch):
     state = library.versions(book["id"])
     assert book["segments"][0]["id"] not in state
     assert book["segments"][1]["id"] in state
+
+
+def test_generate_endpoint_accepts_paragraph_scope(tmp_path, monkeypatch):
+    fake = FakeCVS()
+    monkeypatch.setattr(app_module, "cvs", fake)
+    library = BookLibrary(tmp_path / "data")
+    monkeypatch.setattr(app_module, "library", library)
+    monkeypatch.setattr(app_module, "generation_ledger", FakeLedger())
+
+    document = {
+        "title": "Paragraph",
+        "chapters": [
+            {"title": "One", "paragraphs": ["A.", "B."]},
+        ],
+    }
+    segments = [
+        {"chapterIndex": 0, "paragraphIndex": 0, "start": 0, "end": 2, "text": "A."},
+        {"chapterIndex": 0, "paragraphIndex": 1, "start": 0, "end": 2, "text": "B."},
+    ]
+    book = library.put_book(document, segments, kind="txt")
+
+    class ImmediatePool:
+        def submit(self, fn, *args):
+            fn(*args)
+
+    monkeypatch.setattr(app_module, "generation_pool", ImmediatePool())
+
+    response = client.post(
+        f"/v1/books/{book['id']}/generate",
+        headers={"X-CVR-Token": app_module.ADMIN_TOKEN},
+        json={
+            "voice": "march-7th",
+            "model_id": "local-v4",
+            "reference_id": "neutral",
+            "speed": 1.0,
+            "continuous_emotion": False,
+            "scope": "paragraph",
+            "chapter_index": 0,
+            "paragraph_index": 1,
+        },
+    )
+    assert response.status_code == 200
+    state = library.versions(book["id"])
+    assert book["segments"][0]["id"] not in state
+    assert book["segments"][1]["id"] in state
