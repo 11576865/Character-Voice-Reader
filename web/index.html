@@ -108,6 +108,41 @@
       </div>
     </section>
 
+    <section id="generationPanel" class="generation-panel" aria-labelledby="generationTitle">
+      <div class="generation-head">
+        <div>
+          <div class="eyebrow">GENERATION PROVENANCE</div>
+          <h2 id="generationTitle">当前生成链</h2>
+        </div>
+        <span id="generationState" class="generation-state">尚无生成记录</span>
+      </div>
+      <div class="generation-chain" aria-live="polite">
+        <div class="generation-node">
+          <span>角色</span>
+          <strong id="generationVoice">—</strong>
+        </div>
+        <div class="generation-arrow" aria-hidden="true">→</div>
+        <div class="generation-node">
+          <span>模型</span>
+          <strong id="generationModel">—</strong>
+        </div>
+        <div class="generation-arrow" aria-hidden="true">→</div>
+        <div class="generation-node">
+          <span>引擎</span>
+          <strong id="generationEngine">—</strong>
+        </div>
+        <div class="generation-arrow" aria-hidden="true">→</div>
+        <div class="generation-node">
+          <span>Runtime</span>
+          <strong id="generationRuntime">—</strong>
+        </div>
+      </div>
+      <div class="generation-revisions">
+        <span>Runtime revision <code id="generationRuntimeRevision">—</code></span>
+        <span>Generation revision <code id="generationRevision">—</code></span>
+      </div>
+    </section>
+
     <div id="storageNotice" hidden>此浏览器无法使用 localStorage，本次阅读位置不会在刷新后保留。</div>
 
     <div class="reader-layout">
