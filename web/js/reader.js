@@ -47,12 +47,15 @@ const ui = {
   suggestSpeakers: element("suggestSpeakers"), speakerSuggestions: element("speakerSuggestions"),
   paragraphVoice: element("paragraphVoice"), paragraphReference: element("paragraphReference"),
   applyParagraphVoice: element("applyParagraphVoice"),
+  startSelectedParagraph: element("startSelectedParagraph"),
   generateSelectedParagraph: element("generateSelectedParagraph"),
   pronunciationFrom: element("pronunciationFrom"), pronunciationTo: element("pronunciationTo"),
   addPronunciation: element("addPronunciation"), pronunciationList: element("pronunciationList"),
   addBookmark: element("addBookmark"), bookmarkList: element("bookmarkList"),
   goBookmark: element("goBookmark"), searchText: element("searchText"),
   searchNext: element("searchNext"), fontSize: element("fontSize"),
+  lineHeight: element("lineHeight"), readingWidth: element("readingWidth"),
+  paragraphGap: element("paragraphGap"), readingProgress: element("readingProgress"),
   theme: element("theme"), sleepMinutes: element("sleepMinutes"),
   refreshGenerationHistory: element("refreshGenerationHistory"),
   generationHistory: element("generationHistory")
@@ -499,6 +502,13 @@ function activePosition() {
   return segments[index] ? { index, segment: segments[index] } : null;
 }
 
+function applyReadingPreferences() {
+  ui.readingPane.style.fontSize = `${ui.fontSize.value}px`;
+  ui.readingPane.style.setProperty("--reader-line-height", ui.lineHeight.value);
+  ui.readingPane.style.setProperty("--reader-width", `${ui.readingWidth.value}px`);
+  ui.readingPane.style.setProperty("--reader-paragraph-gap", `${ui.paragraphGap.value}em`);
+}
+
 function saveProgress(force = false, audioTime = player.currentTime) {
   if (!documentId || !currentDocument || !navigation) return;
   if (!force && Date.now() - lastSaveAt < 2000) return;
@@ -692,7 +702,18 @@ function selectParagraph(chapterIndex, paragraphIndex, node) {
   fillParagraphReferences();
   ui.paragraphReference.value = marked?.reference_id || "";
   ui.applyParagraphVoice.disabled = false;
+  ui.startSelectedParagraph.disabled = false;
   ui.generateSelectedParagraph.disabled = !currentBookId || offlineMode;
+}
+
+async function startFromSelectedParagraph() {
+  if (!selectedParagraph || !navigation) return;
+  const first = segments.find(item =>
+    item.chapterIndex === selectedParagraph.chapterIndex &&
+    item.paragraphIndex === selectedParagraph.paragraphIndex
+  );
+  if (!first) return;
+  await jump(() => navigation.jumpToSegment(first.index));
 }
 
 async function generateSelectedParagraphAudio() {
@@ -784,6 +805,7 @@ function render(snapshot = queue.snapshot) {
   ui.nextSegment.disabled = !hasDocument || loading || awaitingChoice || index >= segments.length - 1;
   ui.regenerateParagraph.disabled = !hasDocument || loading || awaitingChoice || !ui.voice.value || offlineMode;
   ui.previewSelection.disabled = !hasDocument || loading || !ui.voice.value || offlineMode;
+  ui.startSelectedParagraph.disabled = !selectedParagraph || !hasDocument || loading;
   ui.generateSelectedParagraph.disabled =
     !selectedParagraph || !currentBookId || offlineMode || loading;
   ui.previousChapter.disabled = !hasDocument || loading || awaitingChoice ||
@@ -799,10 +821,14 @@ function render(snapshot = queue.snapshot) {
 
   if (hasDocument) {
     ui.currentChapter.textContent = `当前章节：${currentDocument.chapters[chapterIndex]?.title || "—"}`;
+    ui.readingProgress.max = Math.max(1, segments.length);
+    ui.readingProgress.value = Math.min(segments.length, index + 1);
     ui.position.textContent = `第 ${chapterIndex + 1}/${currentDocument.chapters.length} 章 · 本章片段 ${localPosition.index}/${localPosition.total} · 全书片段 ${index + 1}/${segments.length}`;
     chapterButtons.forEach((button, i) => button.classList.toggle("active", i === chapterIndex));
     highlightSegment(index);
   } else {
+    ui.readingProgress.max = 1;
+    ui.readingProgress.value = 0;
     ui.currentChapter.textContent = "当前章节：—";
     ui.position.textContent = "尚未开始阅读";
   }
@@ -1615,6 +1641,7 @@ ui.voice.addEventListener("change", () => {
 });
 ui.paragraphVoice.addEventListener("change", fillParagraphReferences);
 ui.applyParagraphVoice.addEventListener("click", applyParagraphVoice);
+ui.startSelectedParagraph.addEventListener("click", startFromSelectedParagraph);
 ui.generateSelectedParagraph.addEventListener("click", generateSelectedParagraphAudio);
 ui.addPronunciation.addEventListener("click", () => {
   updatePronunciation(ui.pronunciationFrom.value, ui.pronunciationTo.value);
@@ -1629,8 +1656,20 @@ ui.goBookmark.addEventListener("click", () => {
 });
 ui.searchNext.addEventListener("click", searchNext);
 ui.fontSize.addEventListener("input", () => {
-  ui.readingPane.style.fontSize = `${ui.fontSize.value}px`;
+  applyReadingPreferences();
   localStorage.setItem("cvs.reader.fontSize", ui.fontSize.value);
+});
+ui.lineHeight.addEventListener("change", () => {
+  applyReadingPreferences();
+  localStorage.setItem("cvs.reader.lineHeight", ui.lineHeight.value);
+});
+ui.readingWidth.addEventListener("change", () => {
+  applyReadingPreferences();
+  localStorage.setItem("cvs.reader.readingWidth", ui.readingWidth.value);
+});
+ui.paragraphGap.addEventListener("change", () => {
+  applyReadingPreferences();
+  localStorage.setItem("cvs.reader.paragraphGap", ui.paragraphGap.value);
 });
 ui.theme.addEventListener("change", () => {
   document.body.dataset.theme = ui.theme.value;
@@ -1707,7 +1746,10 @@ window.addEventListener("online", syncOfflineChanges);
 render();
 try {
   ui.fontSize.value = localStorage.getItem("cvs.reader.fontSize") || "18";
-  ui.readingPane.style.fontSize = `${ui.fontSize.value}px`;
+  ui.lineHeight.value = localStorage.getItem("cvs.reader.lineHeight") || "1.86";
+  ui.readingWidth.value = localStorage.getItem("cvs.reader.readingWidth") || "860";
+  ui.paragraphGap.value = localStorage.getItem("cvs.reader.paragraphGap") || "1.15";
+  applyReadingPreferences();
   ui.theme.value = localStorage.getItem("cvs.reader.theme") || "auto";
   document.body.dataset.theme = ui.theme.value;
   ui.prefetchAhead.value = localStorage.getItem("cvs.reader.prefetchAhead") || "1";
