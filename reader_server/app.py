@@ -174,6 +174,8 @@ def speech(request: SpeechRequest):
         "x-selected-reference", "x-reference-reason",
         "x-cvs-voice", "x-cvs-model", "x-cvs-engine",
         "x-cvs-model-revision", "x-cvs-generation-revision",
+        "x-cvs-runtime", "x-cvs-runtime-revision",
+        "x-cvs-binding", "x-cvs-binding-revision",
         "x-cvs-request-id",
     ):
         if name in headers:
@@ -446,16 +448,22 @@ def _generate_book(book_id: str, settings: dict, cancel: threading.Event):
             if not reference_id:
                 reference_id = summary.get("default_reference")
 
-            model_identity = {
-                "model_id": model_meta.get("model_id") or model_alias,
-                "revision": model_meta.get("revision"),
+            payload = {
+                "voice": voice,
+                "model_id": model_alias,
+                "reference_id": reference_id,
+                "input": text_to_speak,
+                "response_format": "wav",
+                "speed": settings["speed"],
             }
+            provenance = cvs.json("POST", "/v1/audio/resolve", body=payload)
+            generation_revision = provenance.get("generation_revision")
+            if not generation_revision:
+                raise RuntimeError("Character Voice Service did not return generation provenance")
+
             fingerprint = hashlib.sha256(json.dumps({
                 "text": text_to_speak,
-                "voice": voice,
-                "model": model_identity,
-                "reference_id": reference_id,
-                "speed": settings["speed"],
+                "generation_revision": generation_revision,
             }, sort_keys=True).encode()).hexdigest()
 
             existing = library.versions(book_id).get(segment["id"], {})
@@ -469,24 +477,38 @@ def _generate_book(book_id: str, settings: dict, cancel: threading.Event):
                 or chosen.get("metadata", {}).get("fingerprint") != fingerprint
                 or not library.audio_path(book_id, segment["id"])
             ):
-                payload = {
-                    "voice": voice,
-                    "model_id": model_alias,
-                    "reference_id": reference_id,
-                    "input": text_to_speak,
-                    "response_format": "wav",
-                    "speed": settings["speed"],
-                }
                 audio, headers = cvs.speech(payload)
                 actual_reference = headers.get("x-selected-reference") or reference_id
+                actual_generation_revision = (
+                    headers.get("x-cvs-generation-revision") or generation_revision
+                )
+                actual_fingerprint = hashlib.sha256(json.dumps({
+                    "text": text_to_speak,
+                    "generation_revision": actual_generation_revision,
+                }, sort_keys=True).encode()).hexdigest()
                 library.add_version(book_id, segment["id"], audio, {
                     "voice": voice,
                     "model_alias": model_alias,
-                    "model_id": model_identity["model_id"],
-                    "model_revision": model_identity["revision"],
+                    "model_id": headers.get("x-cvs-model") or provenance.get("model"),
+                    "model_revision": (
+                        headers.get("x-cvs-model-revision")
+                        or provenance.get("model_revision")
+                    ),
+                    "engine": headers.get("x-cvs-engine") or provenance.get("engine"),
+                    "runtime": headers.get("x-cvs-runtime") or provenance.get("runtime"),
+                    "runtime_revision": (
+                        headers.get("x-cvs-runtime-revision")
+                        or provenance.get("runtime_revision")
+                    ),
+                    "binding": headers.get("x-cvs-binding") or provenance.get("binding"),
+                    "binding_revision": (
+                        headers.get("x-cvs-binding-revision")
+                        or provenance.get("binding_revision")
+                    ),
+                    "generation_revision": actual_generation_revision,
                     "reference_id": actual_reference,
                     "speed": settings["speed"],
-                    "fingerprint": fingerprint,
+                    "fingerprint": actual_fingerprint,
                     "pronunciationsUpdatedAt": book.get("pronunciationsUpdatedAt"),
                 })
 
