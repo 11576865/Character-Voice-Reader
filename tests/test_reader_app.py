@@ -101,6 +101,23 @@ def test_voice_and_speech_are_cvs_contract_proxies(monkeypatch):
     assert speech.headers["x-cvs-binding"] == "march-gpt"
 
 
+def test_generation_resolve_is_cvs_contract_proxy(monkeypatch):
+    monkeypatch.setattr(app_module, "cvs", FakeCVS())
+    response = client.post("/v1/audio/resolve", json={
+        "voice": "march-7th",
+        "model_id": "local-v4",
+        "reference_id": "neutral",
+        "input": "Hello",
+        "speed": 1.0,
+    })
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["engine"] == "gpt-sovits"
+    assert payload["runtime"] == "gpt-sovits-local"
+    assert payload["runtime_revision"] == "r" * 64
+    assert payload["generation_revision"] == "g" * 64
+
+
 def test_book_library_is_reader_owned(tmp_path, monkeypatch):
     monkeypatch.setattr(app_module, "cvs", FakeCVS())
     monkeypatch.setattr(app_module, "library", BookLibrary(tmp_path / "data"))
