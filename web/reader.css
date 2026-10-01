@@ -409,6 +409,96 @@ details > summary {
   min-width: 82px;
 }
 
+.generation-panel {
+  margin-top: 10px;
+  padding: 13px 14px;
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  background: var(--panel);
+  box-shadow: var(--shadow);
+}
+
+.generation-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.generation-head h2 {
+  margin: 2px 0 0;
+  font-size: .95rem;
+}
+
+.generation-state {
+  color: var(--muted);
+  font-size: .72rem;
+}
+
+.generation-chain {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto minmax(0, 1fr) auto minmax(0, 1fr) auto minmax(0, 1fr);
+  gap: 8px;
+  align-items: stretch;
+  margin-top: 12px;
+}
+
+.generation-node {
+  min-width: 0;
+  padding: 9px 10px;
+  border: 1px solid var(--border);
+  border-radius: 9px;
+  background: var(--panel-soft);
+}
+
+.generation-node span {
+  display: block;
+  color: var(--muted);
+  font-size: .68rem;
+}
+
+.generation-node strong {
+  display: block;
+  margin-top: 2px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: .78rem;
+}
+
+.generation-arrow {
+  align-self: center;
+  color: var(--muted);
+}
+
+.generation-revisions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px 18px;
+  margin-top: 9px;
+  color: var(--muted);
+  font-size: .68rem;
+}
+
+.generation-revisions code {
+  color: var(--text);
+}
+
+.version-provenance {
+  margin-top: 10px;
+  padding: 9px 10px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--panel-soft);
+  color: var(--muted);
+  font-size: .72rem;
+  line-height: 1.55;
+}
+
+.version-provenance strong {
+  color: var(--text);
+}
+
 #storageNotice {
   margin-top: 10px;
   color: var(--warning);
@@ -638,6 +728,14 @@ audio {
     justify-content: flex-start;
   }
 
+  .generation-chain {
+    grid-template-columns: 1fr 1fr;
+  }
+
+  .generation-arrow {
+    display: none;
+  }
+
   .reader-layout {
     grid-template-columns: 200px minmax(0, 1fr);
   }
@@ -700,6 +798,15 @@ audio {
   }
 
   .version-row {
+    grid-template-columns: 1fr;
+  }
+
+  .generation-head {
+    align-items: flex-start;
+    flex-direction: column;
+  }
+
+  .generation-chain {
     grid-template-columns: 1fr;
   }
 
