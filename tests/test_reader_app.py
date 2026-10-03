@@ -56,6 +56,7 @@ class FakeCVS:
                 "models": [{
                     "id": "local-v4",
                     "name": "Local v4",
+                    "engine": "gpt-sovits",
                     "model_id": "march7-gsv-v4-a",
                     "revision": "abc",
                 }],
@@ -68,6 +69,12 @@ class FakeCVS:
                     "quality": "good",
                     "intensity": 0.5,
                 }],
+            }]}
+        if path == "/v1/engines":
+            return {"engines": [{
+                "engine": "gpt-sovits",
+                "status": "ready",
+                "capabilities": {"fine_tuned_model": True},
             }]}
         if path == "/v1/audio/resolve":
             payload = kwargs.get("body") or {}
@@ -119,6 +126,10 @@ def test_voice_and_speech_are_cvs_contract_proxies(monkeypatch):
     voices = client.get("/v1/voices")
     assert voices.status_code == 200
     assert voices.json()["voices"][0]["id"] == "march-7th"
+
+    engines = client.get("/v1/engines")
+    assert engines.status_code == 200
+    assert engines.json()["engines"][0]["engine"] == "gpt-sovits"
 
     speech = client.post("/v1/audio/speech", json={
         "voice": "march-7th",

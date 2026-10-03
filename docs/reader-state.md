@@ -2,7 +2,7 @@
 
 ## 进度记录
 
-TXT 和 EPUB 文件的阅读位置保存在当前浏览器的 `localStorage`，不上传服务端。键名为 `cvs.reader.progress.v1:` 加 `documentId`。记录格式：
+TXT、EPUB、Markdown 和 DOCX 文件的阅读位置保存在当前浏览器的 `localStorage`，不上传服务端。v0.2 起键名为 `cvr.reader.progress.v1:` 加 `documentId`。记录格式：
 
 ```json
 {
@@ -26,11 +26,40 @@ TXT 和 EPUB 文件的阅读位置保存在当前浏览器的 `localStorage`，�
 
 存储不可用时页面给出提示，本次页面内仍可继续朗读；损坏的 JSON、未知版本或无效记录被忽略。若记录的片段索引超出当前文档范围，回退到记录章节首个可朗读片段；该章节也为空时回退到全书第一片段，并清零音频时间。空章节无法作为播放目标，导航按钮会跳过它们。
 
-进度只属于当前浏览器、当前站点来源（协议、主机和端口）。换设备、换浏览器或换访问地址不会自动共享。没有书库、账号、云同步或数据库。
+进度只属于当前浏览器、当前站点来源（协议、主机和端口）。换设备、换浏览器或换访问地址不会自动共享。
+
+## v0.2 独立项目命名空间迁移
+
+Reader 从 Character Voice Service 拆分为独立项目后，本地状态不再继续写入 `cvs.*` / `cvs-*` 命名空间。
+
+新命名包括：
+
+```text
+cvr.reader.progress.v1:
+cvr.bookmarks.v1:
+cvr.voices.cache
+cvr.reader.fontSize
+cvr.reader.lineHeight
+cvr.reader.readingWidth
+cvr.reader.paragraphGap
+cvr.reader.theme
+cvr.reader.prefetchAhead
+character-voice-reader-variants
+character-voice-reader-offline
+```
+
+v0.2 采用“读取旧数据时再复制”的渐进迁移策略：
+
+- 进度、书签、角色缓存和阅读偏好：如果新 key 不存在，会读取旧 `cvs.*` key，并复制到新 key。
+- 段落语音版本：优先读取 `character-voice-reader-variants`，找不到时再读取旧 `cvs-reader-variants` 并复制当前使用的记录。
+- 离线书库：优先读取 `character-voice-reader-offline`，必要时回退旧 `cvs-offline-library`，并把访问到的书籍/音频复制到新数据库。
+- 迁移窗口内不会主动删除旧 key / 旧 IndexedDB；这样发生回滚时，旧版本 Reader 仍有机会继续读取原状态。
+
+因此升级 v0.2 不应导致已有阅读进度、书签、段落版本或离线书籍静默消失。
 
 ## 跳转流程
 
-章节列表、上一章/下一章、上一段/下一段都交给 `ReaderNavigation` 计算目标。有效跳转先记录新位置，再调用 `ReaderQueue.start()`：队列递增会话编号、取消当前请求和预取请求、停止播放器、释放旧 Object URL、清空 `nextAudio`，然后只请求目标片段。过期请求即使晚返回也不能覆盖新会话。新的片段开始播放后，只预取紧邻的下一片段。
+章节列表、上一章/下一章、上一段/下一段都交给 `ReaderNavigation` 计算目标。有效跳转先记录新位置，再调用 `ReaderQueue.start()`：队列递增会话编号、取消当前请求和预取请求、停止播放器、释放旧 Object URL、清空 `nextAudio`，然后只请求目标片段。过期请求即使晚返回也不能覆盖新会话。新的片段开始播放后，按当前预取设置顺序生成后续片段。
 
 正在播放、生成或暂停时都可跳转。无效目标不会改变播放状态；连续快速跳转以最后一次有效跳转为准。重新加载文件时先保存当前进度并停止旧队列；文件读取结果也有序号保护，旧文件的迟到结果不会替换新文件。
 
@@ -42,8 +71,8 @@ TXT 和 EPUB 文件的阅读位置保存在当前浏览器的 `localStorage`，�
 | `segmenter.js` | `TextDocument` 转换为保留章节、段落和原文位置的 `AudioSegment[]`。 |
 | `progress.js` | 文件 ID、进度校验和 localStorage 读写；不控制播放。 |
 | `navigation.js` | 章节与片段的目标索引、边界和跳转协调。 |
-| `queue.js` | 播放状态、当前片段、单段预取、请求取消和会话隔离。 |
+| `queue.js` | 播放状态、当前片段、可配置的顺序预取、请求取消和会话隔离。 |
 | `player.js` | HTML audio、暂停/继续、音频时间和 Object URL 生命周期。 |
 | `reader.js` | 文件加载、UI、模块协作及保存时机；不解析文件，也不直接操作 audio。 |
 
-Reader 仍通过现有 `GET /v1/voices` 和 `POST /v1/audio/speech` 使用 Character Voice Service；进度功能不改变语音 API。
+Reader 通过 Character Voice Contract v1 使用 `GET /health`、`GET /v1/voices`、`GET /v1/engines` 和 `POST /v1/audio/speech`；本地状态迁移不改变语音 API。
