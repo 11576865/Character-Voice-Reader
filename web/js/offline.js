@@ -1,46 +1,101 @@
-const DB = "cvs-offline-library";
+const DB = "character-voice-reader-offline";
+const LEGACY_DB = "cvs-offline-library";
 const BOOKS = "books";
 const CLIPS = "clips";
 
-function open() {
+function openDatabase(name = DB, { create = true } = {}) {
   return new Promise((resolve, reject) => {
     if (!globalThis.indexedDB) return reject(new Error("此浏览器不支持离线书库。"));
-    const request = indexedDB.open(DB, 1);
+    const request = indexedDB.open(name, 1);
+    let createdLegacy = false;
     request.onupgradeneeded = () => {
-      request.result.createObjectStore(BOOKS);
-      request.result.createObjectStore(CLIPS);
+      if (!create) {
+        createdLegacy = true;
+        request.transaction.abort();
+        return;
+      }
+      if (!request.result.objectStoreNames.contains(BOOKS)) {
+        request.result.createObjectStore(BOOKS);
+      }
+      if (!request.result.objectStoreNames.contains(CLIPS)) {
+        request.result.createObjectStore(CLIPS);
+      }
     };
-    request.onsuccess = () => resolve(request.result);
-    request.onerror = () => reject(request.error);
+    request.onsuccess = () => {
+      if (createdLegacy) {
+        request.result.close();
+        resolve(null);
+        return;
+      }
+      resolve(request.result);
+    };
+    request.onerror = () => {
+      if (!create && (createdLegacy || request.error?.name === "AbortError")) {
+        resolve(null);
+      } else {
+        reject(request.error);
+      }
+    };
   });
 }
 
-async function transaction(store, mode, operation) {
-  const db = await open();
+async function transaction(store, mode, operation, { legacy = false } = {}) {
+  const db = await openDatabase(legacy ? LEGACY_DB : DB, { create: !legacy });
+  if (!db) return undefined;
   return new Promise((resolve, reject) => {
     const tx = db.transaction(store, mode);
     const request = operation(tx.objectStore(store));
     tx.oncomplete = () => { db.close(); resolve(request.result); };
     tx.onerror = () => { db.close(); reject(tx.error || request.error); };
+    tx.onabort = () => { db.close(); reject(tx.error || request.error); };
   });
 }
 
 const clipKey = (bookId, segmentId) => `${bookId}:${segmentId}`;
 
 export class OfflineLibrary {
-  getBook(id) { return transaction(BOOKS, "readonly", store => store.get(id)); }
-  getClip(bookId, segmentId) {
-    return transaction(CLIPS, "readonly", store => store.get(clipKey(bookId, segmentId)));
+  async getBook(id) {
+    let book = await transaction(BOOKS, "readonly", store => store.get(id));
+    if (book !== undefined) return book;
+    book = await transaction(BOOKS, "readonly", store => store.get(id), { legacy: true });
+    if (book !== undefined) await this.putBook(book);
+    return book;
   }
-  putBook(book) { return transaction(BOOKS, "readwrite", store => store.put(book, book.id)); }
+
+  async getClip(bookId, segmentId) {
+    const key = clipKey(bookId, segmentId);
+    let clip = await transaction(CLIPS, "readonly", store => store.get(key));
+    if (clip !== undefined) return clip;
+    clip = await transaction(CLIPS, "readonly", store => store.get(key), { legacy: true });
+    if (clip !== undefined) await this.putClip(bookId, segmentId, clip);
+    return clip;
+  }
+
+  putBook(book) {
+    return transaction(BOOKS, "readwrite", store => store.put(book, book.id));
+  }
+
   async updateBook(id, changes) {
     const current = await this.getBook(id);
     if (current) await this.putBook({ ...current, ...changes });
   }
+
   putClip(bookId, segmentId, audio) {
     return transaction(CLIPS, "readwrite", store => store.put(audio, clipKey(bookId, segmentId)));
   }
-  listBooks() { return transaction(BOOKS, "readonly", store => store.getAll()); }
+
+  async listBooks() {
+    const current = await transaction(BOOKS, "readonly", store => store.getAll()) || [];
+    const legacy = await transaction(BOOKS, "readonly", store => store.getAll(), { legacy: true }) || [];
+    const byId = new Map(current.map(book => [book.id, book]));
+    for (const book of legacy) {
+      if (!byId.has(book.id)) {
+        byId.set(book.id, book);
+        await this.putBook(book);
+      }
+    }
+    return [...byId.values()];
+  }
 
   async removeBook(id) {
     const book = await this.getBook(id);
@@ -50,6 +105,7 @@ export class OfflineLibrary {
       }
     }
     await transaction(BOOKS, "readwrite", store => store.delete(id));
+    // Legacy DB is intentionally left intact during the migration window.
   }
 
   async download(manifest, fetchAudio, onProgress = () => {}) {
