@@ -1,0 +1,113 @@
+name: Branch hygiene
+
+on:
+  pull_request:
+    types: [closed]
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/branch-hygiene.yml'
+  schedule:
+    - cron: '17 4 * * 0'
+  workflow_dispatch:
+
+permissions:
+  contents: write
+  pull-requests: read
+
+concurrency:
+  group: branch-hygiene-${{ github.repository }}
+  cancel-in-progress: false
+
+jobs:
+  sweep:
+    if: github.event_name != 'pull_request' || (github.event.pull_request.merged == true && github.event.pull_request.head.repo.full_name == github.repository)
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    env:
+      GH_TOKEN: ${{ github.token }}
+      DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
+      ACTIVE_BRANCH_BUDGET: '8'
+    steps:
+      - name: Delete only branches already contained in the default branch
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          repo="$GITHUB_REPOSITORY"
+          default_branch="${DEFAULT_BRANCH:-main}"
+
+          mapfile -t open_refs < <(
+            gh api --paginate "repos/$repo/pulls?state=open&per_page=100" --jq '.[].head.ref'
+          )
+
+          is_open_pr_head() {
+            local candidate="$1"
+            local item
+            for item in "${open_refs[@]}"; do
+              if [[ "$item" == "$candidate" ]]; then
+                return 0
+              fi
+            done
+            return 1
+          }
+
+          url_encode() {
+            python3 -c 'import sys, urllib.parse; print(urllib.parse.quote(sys.argv[1], safe=""))' "$1"
+          }
+
+          deleted=0
+          active=0
+          retained=0
+          compare_failures=0
+
+          while IFS=$'\t' read -r branch protected; do
+            [[ -z "$branch" || "$branch" == "$default_branch" ]] && continue
+
+            case "$branch" in
+              gh-pages|develop|dev|staging|release/*|releases/*|version/*|maintenance/*|integration/*)
+                retained=$((retained + 1))
+                continue
+                ;;
+            esac
+
+            if [[ "$protected" == "true" ]]; then
+              retained=$((retained + 1))
+              continue
+            fi
+
+            if is_open_pr_head "$branch"; then
+              active=$((active + 1))
+              continue
+            fi
+
+            encoded_default="$(url_encode "$default_branch")"
+            encoded_branch="$(url_encode "$branch")"
+            compare_json="$(gh api "repos/$repo/compare/${encoded_default}...${encoded_branch}" 2>/dev/null || true)"
+            ahead_by="$(jq -r '.ahead_by // -1' <<<"$compare_json" 2>/dev/null || printf '%s' '-1')"
+
+            if [[ "$ahead_by" == "0" ]]; then
+              if gh api "repos/$repo/git/ref/heads/${encoded_branch}" >/dev/null 2>&1; then
+                echo "Deleting fully merged branch: $branch"
+                gh api -X DELETE "repos/$repo/git/refs/heads/${encoded_branch}"
+                deleted=$((deleted + 1))
+              fi
+              continue
+            fi
+
+            if [[ "$ahead_by" =~ ^[0-9]+$ ]]; then
+              active=$((active + 1))
+            else
+              compare_failures=$((compare_failures + 1))
+              active=$((active + 1))
+              echo "::warning::Could not classify branch '$branch'; retaining it."
+            fi
+          done < <(
+            gh api --paginate "repos/$repo/branches?per_page=100"               --jq '.[] | [.name, (.protected | tostring)] | @tsv'
+          )
+
+          echo "Branch hygiene summary: deleted=$deleted active_or_unique=$active retained=$retained compare_failures=$compare_failures"
+
+          if (( active > ACTIVE_BRANCH_BUDGET )); then
+            echo "::warning::Active/unique work branches ($active) exceed budget ($ACTIVE_BRANCH_BUDGET). Consolidate or explicitly retain before creating ordinary new work branches."
+          fi
