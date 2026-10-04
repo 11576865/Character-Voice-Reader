@@ -471,11 +471,23 @@ async function requestAudio(options) {
   if (offlineMode) throw new Error("此段音频未下载，离线时无法重新生成。 ");
   const selectedVersion = bookVersions[segmentId];
   const metadata = selectedVersion?.metadata;
-  const expectedReference = options.referenceId || voiceCatalog.get(options.voice)?.default_reference;
+  const voiceSummary = voiceCatalog.get(options.voice);
+  const expectedModelAlias = options.modelId || voiceSummary?.default_model || null;
+  const expectedModel = voiceSummary?.models?.find(item => item.id === expectedModelAlias) || null;
+  const expectedResolvedModel = expectedModel?.model_id || expectedModelAlias;
+  const expectedModelRevision = expectedModel?.revision || null;
+  const expectedReference = options.referenceId || voiceSummary?.default_reference;
+  const modelMatches = !expectedModelAlias ||
+    metadata?.model_alias === expectedModelAlias ||
+    metadata?.model_id === expectedResolvedModel;
+  const revisionMatches = !expectedModelRevision ||
+    metadata?.model_revision === expectedModelRevision;
+  const speedMatches = Number(metadata?.speed ?? 1) === Number(options.speed);
   const versionMatches = metadata?.pronunciationsUpdatedAt === pronunciationsUpdatedAt &&
     metadata?.voice === options.voice &&
-    (!options.modelId || metadata.model_alias === options.modelId ||
-      metadata.model_id === options.modelId) &&
+    modelMatches &&
+    revisionMatches &&
+    speedMatches &&
     (expectedReference === "auto" || !expectedReference || metadata.reference_id === expectedReference);
   if (currentBookId && segmentId && versionMatches) {
     const response = await fetch(`/v1/books/${currentBookId}/audio/${segmentId}`, {
@@ -560,7 +572,8 @@ function saveProgress(force = false, audioTime = player.currentTime) {
 
 function onQueueChange(snapshot) {
   navigation?.sync(snapshot);
-  if (snapshot.currentSegment && ["generating", "playing", "paused"].includes(snapshot.state)) {
+  if (snapshot.currentSegment &&
+      ["loading", "advancing", "playing", "paused", "error"].includes(snapshot.state)) {
     const changed = highlightedIndex !== snapshot.index;
     if (snapshot.index === jumpSavedIndex) {
       // onJump already wrote the target position and seek time.
@@ -809,7 +822,8 @@ async function applyParagraphVoice() {
 }
 
 function render(snapshot = queue.snapshot) {
-  const active = ["generating", "playing", "paused"].includes(snapshot.state);
+  const busy = ["loading", "advancing", "playing", "paused"].includes(snapshot.state);
+  const active = busy || snapshot.state === "error";
   const hasDocument = Boolean(currentDocument && segments.length);
   const position = activePosition();
   const index = position?.index ?? 0;
@@ -817,8 +831,11 @@ function render(snapshot = queue.snapshot) {
   const localPosition = chapterPosition(segments, index);
   const awaitingChoice = Boolean(pendingProgress);
 
-  ui.start.disabled = !hasDocument || !ui.voice.value || loading || active && snapshot.state !== "paused" || awaitingChoice;
-  ui.start.textContent = snapshot.state === "paused" || stoppedPosition ? "继续" : "开始";
+  ui.start.disabled = !hasDocument || !ui.voice.value || loading ||
+    (busy && snapshot.state !== "paused") || awaitingChoice;
+  ui.start.textContent = snapshot.state === "error"
+    ? "重试"
+    : snapshot.state === "paused" || stoppedPosition ? "继续" : "开始";
   ui.pause.disabled = snapshot.state !== "playing";
   ui.stop.disabled = !active;
   ui.voice.disabled = active || loading || !ui.voice.value;
@@ -860,12 +877,17 @@ function render(snapshot = queue.snapshot) {
   }
 
   const number = snapshot.currentSegment ? `${snapshot.index + 1}/${snapshot.total}` : "";
+  const prefetchLabel = snapshot.prefetchReadyCount
+    ? `；已预取 ${snapshot.prefetchReadyCount}/${snapshot.prefetchAhead} 段`
+    : snapshot.prefetchPendingCount ? "；正在预取" : "";
   const messages = {
     idle: hasDocument ? "已就绪。" : "请选择或粘贴文本。",
-    generating: `正在生成第 ${number} 个片段……`,
-    playing: `正在播放第 ${number} 个片段${snapshot.prefetchReady ? "；下一段已就绪" : ""}。`,
+    loading: `正在生成第 ${number} 个片段……`,
+    advancing: `正在衔接第 ${number} 个片段……`,
+    playing: `正在播放第 ${number} 个片段${prefetchLabel}。`,
     paused: `已暂停在第 ${number} 个片段。`,
-    stopped: snapshot.error ? `朗读失败：${snapshot.error.message}` : "已停止，当前位置已保留。",
+    error: `朗读失败：${snapshot.error?.message || "未知错误"}。可重试或跳过此段。`,
+    cancelled: "已停止，当前位置已保留。",
     finished: `朗读完成，共 ${snapshot.total} 个片段。`
   };
   const choice = selectedReferences.get(index);
@@ -876,7 +898,9 @@ function render(snapshot = queue.snapshot) {
     ? ` · 引擎：${provenance.engine}${provenance.runtime ? ` · Runtime：${provenance.runtime}` : ""}`
     : "";
   ui.status.textContent = statusOverride ||
-    (loading ? "正在读取文件……" : messages[snapshot.state] + choiceLabel + provenanceLabel);
+    (loading
+      ? "正在读取文件……"
+      : (messages[snapshot.state] || "状态未知。") + choiceLabel + provenanceLabel);
   renderGenerationProvenance(index);
 }
 
@@ -995,6 +1019,10 @@ async function startOrResume() {
   if (!navigation || pendingProgress) return;
   if (queue.state === "paused") {
     await queue.resume();
+    return;
+  }
+  if (queue.state === "error") {
+    await queue.retry();
     return;
   }
   const position = stoppedPosition;
