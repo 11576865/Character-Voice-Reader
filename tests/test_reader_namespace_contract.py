@@ -34,9 +34,9 @@ def test_service_worker_and_entry_assets_share_explicit_revision():
     index = (ROOT / "web" / "index.html").read_text(encoding="utf-8")
     service_worker = (ROOT / "web" / "sw.js").read_text(encoding="utf-8")
 
-    assert 'reader.css?v=3' in index
-    assert 'reader.js?v=3' in index
-    assert 'character-voice-reader-shell-v3' in service_worker
+    assert 'reader.css?v=4' in index
+    assert 'reader.js?v=4' in index
+    assert 'character-voice-reader-shell-v4' in service_worker
     assert 'ignoreSearch: true' in service_worker
     assert '"/reader-assets/reader.css"' in service_worker
     assert '"/reader-assets/js/api.js"' in service_worker
