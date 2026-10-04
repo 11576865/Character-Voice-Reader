@@ -22,6 +22,9 @@ jobs:
       - run: python -m pytest -q
       - run: |
           node --check web/js/reader.js
+          node --check web/js/api.js
           node --check web/js/queue.js
+          node --check web/js/progress.js
+          node --check web/js/variants.js
           node --check web/js/offline.js
           node --check web/js/foliate_prototype.js

@@ -26,7 +26,7 @@ from reader_server.pronunciations import spoken_text
 from reader_server.speaker_suggestions import suggest_speakers
 
 
-app = FastAPI(title="Character Voice Reader", version="0.1.0")
+app = FastAPI(title="Character Voice Reader", version="0.2.0")
 app.mount("/reader-assets", StaticFiles(directory=WEB_DIR), name="reader-assets")
 FOLIATE_DIR = WEB_DIR.parent / "vendor" / "foliate-js"
 if FOLIATE_DIR.is_dir():
@@ -163,6 +163,14 @@ def login(request: LoginRequest, http_request: Request):
 def voices():
     try:
         return cvs.json("GET", "/v1/voices")
+    except CVSError as exc:
+        _cvs_error(exc)
+
+
+@app.get("/v1/engines")
+def engines():
+    try:
+        return cvs.json("GET", "/v1/engines")
     except CVSError as exc:
         _cvs_error(exc)
 

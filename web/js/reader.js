@@ -7,6 +7,7 @@ import { ProgressStore, documentIdForFile } from "./progress.js";
 import { ReaderNavigation, chapterStart, chapterPosition } from "./navigation.js";
 import { VariantStore } from "./variants.js";
 import { OfflineLibrary } from "./offline.js";
+import { fetchJson, fetchSpeech } from "./api.js";
 
 const element = id => document.getElementById(id);
 const ui = {
@@ -58,7 +59,9 @@ const ui = {
   paragraphGap: element("paragraphGap"), readingProgress: element("readingProgress"),
   theme: element("theme"), sleepMinutes: element("sleepMinutes"),
   refreshGenerationHistory: element("refreshGenerationHistory"),
-  generationHistory: element("generationHistory")
+  generationHistory: element("generationHistory"),
+  serviceStrip: element("serviceStrip"), serviceStatus: element("serviceStatus"),
+  engineStatus: element("engineStatus"), retryService: element("retryService")
 };
 
 const progressStore = new ProgressStore();
@@ -171,12 +174,48 @@ let bookVersions = {};
 let offlineAudioVersion = null;
 let offlineAnnotationsSignature = "";
 let sleepTimer = null;
+let serviceState = { status: "checking", engines: [] };
 
-function bookmarkKey() { return `cvs.bookmarks.v1:${documentId || "manual"}`; }
+const STORAGE_KEYS = {
+  voiceCache: "cvr.voices.cache",
+  fontSize: "cvr.reader.fontSize",
+  lineHeight: "cvr.reader.lineHeight",
+  readingWidth: "cvr.reader.readingWidth",
+  paragraphGap: "cvr.reader.paragraphGap",
+  theme: "cvr.reader.theme",
+  prefetchAhead: "cvr.reader.prefetchAhead"
+};
+const LEGACY_STORAGE_KEYS = {
+  voiceCache: "cvs.voices.cache",
+  fontSize: "cvs.reader.fontSize",
+  lineHeight: "cvs.reader.lineHeight",
+  readingWidth: "cvs.reader.readingWidth",
+  paragraphGap: "cvs.reader.paragraphGap",
+  theme: "cvs.reader.theme",
+  prefetchAhead: "cvs.reader.prefetchAhead"
+};
+
+function readMigratedStorage(key, legacyKey) {
+  try {
+    const current = localStorage.getItem(key);
+    if (current !== null) return current;
+    const legacy = localStorage.getItem(legacyKey);
+    if (legacy !== null) {
+      localStorage.setItem(key, legacy);
+      return legacy;
+    }
+  } catch (_) {}
+  return null;
+}
+
+function bookmarkKey() { return `cvr.bookmarks.v1:${documentId || "manual"}`; }
+function legacyBookmarkKey() { return `cvs.bookmarks.v1:${documentId || "manual"}`; }
 
 function bookmarks() {
-  try { return JSON.parse(localStorage.getItem(bookmarkKey()) || "[]"); }
-  catch (_) { return []; }
+  try {
+    const raw = readMigratedStorage(bookmarkKey(), legacyBookmarkKey());
+    return JSON.parse(raw || "[]");
+  } catch (_) { return []; }
 }
 
 function renderBookmarks() {
@@ -378,28 +417,16 @@ async function fetchFreshAudio({ segment, voice, modelId, referenceId, speed, si
   });
   render();
 
-  const resolved = await fetch("/v1/audio/resolve", {
+  const plan = await fetchJson("/v1/audio/resolve", {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     signal,
     body: JSON.stringify(payload)
   });
-  if (!resolved.ok) throw new Error((await resolved.text()) || `HTTP ${resolved.status}`);
-  const plan = await resolved.json();
   setSegmentProvenance(segment.index, { ...plan, phase: "preparing" });
   render();
 
-  const response = await fetch("/v1/audio/speech", {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    signal,
-    body: JSON.stringify(payload)
-  });
-  if (!response.ok) throw new Error((await response.text()) || `HTTP ${response.status}`);
-  const contentType = response.headers.get("content-type") || "";
-  if (!contentType.startsWith("audio/wav") && !contentType.startsWith("audio/x-wav")) {
-    throw new Error(`返回了非 WAV 音频：${contentType}`);
-  }
+  const response = await fetchSpeech(payload, { signal });
   const blob = await response.blob();
   selectedReferences.set(segment.index, {
     id: response.headers.get("X-Selected-Reference"),
@@ -485,6 +512,11 @@ function playbackOptions() {
   if (!Number.isFinite(speed) || speed <= 0) throw new Error("速度必须大于 0。");
   if (!Number.isInteger(prefetchAhead) || prefetchAhead < 0 || prefetchAhead > 4) {
     throw new Error("提前生成段数必须在 0 到 4 之间。");
+  }
+  const voice = voiceCatalog.get(ui.voice.value);
+  const model = voice?.models?.find(item => item.id === ui.modelId.value);
+  if (model?.engine && engineState(model.engine) === "offline") {
+    throw new Error(`所选模型的语音引擎当前不可用：${model.engine}`);
   }
   return {
     voice: ui.voice.value,
@@ -1018,12 +1050,10 @@ async function previewSelection() {
   queue.stop();
   try {
     const options = playbackOptions();
-    const response = await fetch("/v1/audio/speech", {
-      method: "POST", headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ voice: options.voice, model_id: options.modelId,
-        reference_id: options.referenceId, input: spokenText(text), speed: options.speed })
+    const response = await fetchSpeech({
+      voice: options.voice, model_id: options.modelId,
+      reference_id: options.referenceId, input: spokenText(text), speed: options.speed
     });
-    if (!response.ok) throw new Error(`HTTP ${response.status}`);
     const url = URL.createObjectURL(await response.blob());
     previewAudio = new Audio(url);
     previewAudio.onended = () => URL.revokeObjectURL(url);
@@ -1141,6 +1171,81 @@ function fillAssetSelect(select, items, defaultId, labelBuilder) {
   }
 }
 
+function engineState(engineId) {
+  if (!engineId) return "unknown";
+  const item = serviceState.engines.find(engine =>
+    (engine.engine || engine.id) === engineId);
+  return item?.status || item?.health?.status || "unknown";
+}
+
+function renderServiceState() {
+  const status = serviceState.status || "offline";
+  ui.serviceStrip.dataset.state = status;
+  const labels = {
+    ready: "Character Voice Service：在线",
+    partial: "Character Voice Service：部分可用",
+    checking: "Character Voice Service：检查中…",
+    offline: "Character Voice Service：不可用"
+  };
+  ui.serviceStatus.textContent = labels[status] || labels.offline;
+  if (!serviceState.engines.length) {
+    ui.engineStatus.textContent = status === "offline"
+      ? (serviceState.error || "无法读取引擎状态")
+      : "未发现语音引擎";
+    return;
+  }
+  ui.engineStatus.textContent = serviceState.engines.map(item => {
+    const id = item.engine || item.id || "unknown";
+    const state = item.status || item.health?.status || "unknown";
+    return `${id}: ${state}`;
+  }).join(" · ");
+}
+
+async function refreshServiceState() {
+  serviceState = { status: "checking", engines: [] };
+  renderServiceState();
+  ui.retryService.disabled = true;
+  try {
+    const [health, discovery] = await Promise.all([
+      fetchJson("/health"),
+      fetchJson("/v1/engines")
+    ]);
+    const healthEngines = Array.isArray(health?.cvs?.engines) ? health.cvs.engines : [];
+    const discovered = Array.isArray(discovery?.engines) ? discovery.engines : [];
+    const byId = new Map();
+    for (const item of discovered) {
+      const id = item.engine || item.id;
+      if (id) byId.set(id, { ...item });
+    }
+    for (const item of healthEngines) {
+      const id = item.engine || item.id;
+      if (!id) continue;
+      byId.set(id, { ...(byId.get(id) || {}), ...item });
+    }
+    const engines = [...byId.values()];
+    const ready = engines.filter(item => ["ready", "ok", "online", "healthy"].includes(
+      item.status || item.health?.status
+    )).length;
+    const unavailable = engines.filter(item => ["offline", "error", "unavailable"].includes(
+      item.status || item.health?.status
+    )).length;
+    serviceState = {
+      status: health?.cvs?.status === "offline"
+        ? "offline"
+        : (ready > 0 && unavailable > 0 ? "partial" : "ready"),
+      engines,
+      error: health?.cvs?.error || null
+    };
+  } catch (error) {
+    serviceState = { status: "offline", engines: [], error: error.message };
+  } finally {
+    ui.retryService.disabled = false;
+    renderServiceState();
+    if (ui.voice.value) syncCharacterAssets();
+    render();
+  }
+}
+
 function syncCharacterAssets() {
   const voice = voiceCatalog.get(ui.voice.value);
   if (!voice) {
@@ -1152,8 +1257,19 @@ function syncCharacterAssets() {
     ui.modelId,
     voice.models,
     voice.default_model,
-    item => [item.name || item.id, item.version].filter(Boolean).join(" · ")
+    item => [item.name || item.id, item.engine, item.version].filter(Boolean).join(" · ")
   );
+  for (const option of ui.modelId.options) {
+    const model = voice.models.find(item => item.id === option.value);
+    if (engineState(model?.engine) === "offline") {
+      option.disabled = true;
+      option.textContent += " · 引擎离线";
+    }
+  }
+  if (ui.modelId.selectedOptions[0]?.disabled) {
+    const replacement = [...ui.modelId.options].find(option => !option.disabled);
+    if (replacement) ui.modelId.value = replacement.value;
+  }
   fillAssetSelect(
     ui.referenceId,
     voice.references,
@@ -1198,23 +1314,23 @@ function installVoices(data) {
 
 async function loadVoices() {
   try {
-    const response = await fetch("/v1/voices");
-    if (!response.ok) throw new Error(`HTTP ${response.status}`);
-    const data = await response.json();
-    try { localStorage.setItem("cvs.voices.cache", JSON.stringify(data)); }
+    const data = await fetchJson("/v1/voices");
+    try { localStorage.setItem(STORAGE_KEYS.voiceCache, JSON.stringify(data)); }
     catch (_) { /* online voice list remains usable */ }
     installVoices(data);
   } catch (error) {
     try {
-      const cached = JSON.parse(localStorage.getItem("cvs.voices.cache") || "null");
+      const cached = JSON.parse(
+        readMigratedStorage(STORAGE_KEYS.voiceCache, LEGACY_STORAGE_KEYS.voiceCache) || "null"
+      );
       if (cached?.voices?.length) {
         installVoices(cached);
-        statusOverride = "当前离线；使用已保存的角色列表。";
+        statusOverride = `当前离线；使用已保存的角色列表。 ${error.message}`;
         render();
         return;
       }
     } catch (_) { /* no cached voice list */ }
-    statusOverride = `无法读取角色列表：${error}`;
+    statusOverride = `无法读取角色列表：${error.message}`;
     render();
   }
 }
@@ -1651,26 +1767,26 @@ ui.goBookmark.addEventListener("click", () => {
 ui.searchNext.addEventListener("click", searchNext);
 ui.fontSize.addEventListener("input", () => {
   applyReadingPreferences();
-  localStorage.setItem("cvs.reader.fontSize", ui.fontSize.value);
+  localStorage.setItem(STORAGE_KEYS.fontSize, ui.fontSize.value);
 });
 ui.lineHeight.addEventListener("change", () => {
   applyReadingPreferences();
-  localStorage.setItem("cvs.reader.lineHeight", ui.lineHeight.value);
+  localStorage.setItem(STORAGE_KEYS.lineHeight, ui.lineHeight.value);
 });
 ui.readingWidth.addEventListener("change", () => {
   applyReadingPreferences();
-  localStorage.setItem("cvs.reader.readingWidth", ui.readingWidth.value);
+  localStorage.setItem(STORAGE_KEYS.readingWidth, ui.readingWidth.value);
 });
 ui.paragraphGap.addEventListener("change", () => {
   applyReadingPreferences();
-  localStorage.setItem("cvs.reader.paragraphGap", ui.paragraphGap.value);
+  localStorage.setItem(STORAGE_KEYS.paragraphGap, ui.paragraphGap.value);
 });
 ui.theme.addEventListener("change", () => {
   document.body.dataset.theme = ui.theme.value;
-  localStorage.setItem("cvs.reader.theme", ui.theme.value);
+  localStorage.setItem(STORAGE_KEYS.theme, ui.theme.value);
 });
 ui.prefetchAhead.addEventListener("change", () => {
-  localStorage.setItem("cvs.reader.prefetchAhead", ui.prefetchAhead.value);
+  localStorage.setItem(STORAGE_KEYS.prefetchAhead, ui.prefetchAhead.value);
 });
 ui.sleepMinutes.addEventListener("change", () => {
   clearTimeout(sleepTimer);
@@ -1681,6 +1797,15 @@ ui.sleepMinutes.addEventListener("change", () => {
     statusOverride = "睡眠定时结束，已暂停朗读。";
     render();
   }, minutes * 60000);
+});
+ui.retryService.addEventListener("click", async () => {
+  statusOverride = "正在重新连接语音服务……";
+  render();
+  await Promise.all([refreshServiceState(), loadVoices()]);
+  if (serviceState.status === "ready" || serviceState.status === "partial") {
+    statusOverride = "语音服务连接已刷新。";
+    render();
+  }
 });
 ui.loginLibrary.addEventListener("click", loginLibrary);
 ui.refreshGenerationHistory.addEventListener("click", loadGenerationHistory);
@@ -1739,15 +1864,28 @@ window.addEventListener("pagehide", () => saveProgress(true));
 window.addEventListener("online", syncOfflineChanges);
 render();
 try {
-  ui.fontSize.value = localStorage.getItem("cvs.reader.fontSize") || "18";
-  ui.lineHeight.value = localStorage.getItem("cvs.reader.lineHeight") || "1.86";
-  ui.readingWidth.value = localStorage.getItem("cvs.reader.readingWidth") || "860";
-  ui.paragraphGap.value = localStorage.getItem("cvs.reader.paragraphGap") || "1.15";
+  ui.fontSize.value = readMigratedStorage(
+    STORAGE_KEYS.fontSize, LEGACY_STORAGE_KEYS.fontSize
+  ) || "18";
+  ui.lineHeight.value = readMigratedStorage(
+    STORAGE_KEYS.lineHeight, LEGACY_STORAGE_KEYS.lineHeight
+  ) || "1.86";
+  ui.readingWidth.value = readMigratedStorage(
+    STORAGE_KEYS.readingWidth, LEGACY_STORAGE_KEYS.readingWidth
+  ) || "860";
+  ui.paragraphGap.value = readMigratedStorage(
+    STORAGE_KEYS.paragraphGap, LEGACY_STORAGE_KEYS.paragraphGap
+  ) || "1.15";
   applyReadingPreferences();
-  ui.theme.value = localStorage.getItem("cvs.reader.theme") || "auto";
+  ui.theme.value = readMigratedStorage(
+    STORAGE_KEYS.theme, LEGACY_STORAGE_KEYS.theme
+  ) || "auto";
   document.body.dataset.theme = ui.theme.value;
-  ui.prefetchAhead.value = localStorage.getItem("cvs.reader.prefetchAhead") || "1";
+  ui.prefetchAhead.value = readMigratedStorage(
+    STORAGE_KEYS.prefetchAhead, LEGACY_STORAGE_KEYS.prefetchAhead
+  ) || "1";
 } catch (_) { /* reader preferences stay in memory */ }
+refreshServiceState();
 loadVoices();
 renderOfflineBooks();
 if ("serviceWorker" in navigator) {
