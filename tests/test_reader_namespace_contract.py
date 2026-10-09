@@ -1,4 +1,5 @@
 from pathlib import Path
+import re
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -34,9 +35,12 @@ def test_service_worker_and_entry_assets_share_explicit_revision():
     index = (ROOT / "web" / "index.html").read_text(encoding="utf-8")
     service_worker = (ROOT / "web" / "sw.js").read_text(encoding="utf-8")
 
-    assert 'reader.css?v=4' in index
-    assert 'reader.js?v=4' in index
-    assert 'character-voice-reader-shell-v4' in service_worker
+    css_version = re.search(r"reader\\.css\\?v=(\\d+)", index)
+    js_version = re.search(r"reader\\.js\\?v=(\\d+)", index)
+    cache_version = re.search(r"character-voice-reader-shell-v(\\d+)", service_worker)
+    assert css_version and js_version and cache_version
+    assert css_version.group(1) == js_version.group(1) == cache_version.group(1)
+    assert int(cache_version.group(1)) >= 5
     assert 'ignoreSearch: true' in service_worker
     assert '"/reader-assets/reader.css"' in service_worker
     assert '"/reader-assets/js/api.js"' in service_worker
