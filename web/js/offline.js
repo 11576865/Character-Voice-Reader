@@ -2,6 +2,8 @@ const DB = "character-voice-reader-offline";
 const LEGACY_DB = "cvs-offline-library";
 const BOOKS = "books";
 const CLIPS = "clips";
+// Keep a deletion marker in the new database while legacy records remain for rollback.
+const isDeletedBook = book => book?.__cvrDeleted === true;
 
 function openDatabase(name = DB, { create = true } = {}) {
   return new Promise((resolve, reject) => {
@@ -51,18 +53,39 @@ async function transaction(store, mode, operation, { legacy = false } = {}) {
   });
 }
 
+// Atomically inspect the new record before copying an old one: a concurrent
+// delete must never be undone by a migration that read the legacy DB earlier.
+async function restoreLegacyBook(book) {
+  const db = await openDatabase();
+  return new Promise((resolve, reject) => {
+    const tx = db.transaction(BOOKS, "readwrite");
+    const store = tx.objectStore(BOOKS);
+    const existing = store.get(book.id);
+    let selected = book;
+    existing.onsuccess = () => {
+      if (existing.result !== undefined) selected = existing.result;
+      else store.put(book, book.id);
+    };
+    tx.oncomplete = () => { db.close(); resolve(isDeletedBook(selected) ? undefined : selected); };
+    tx.onerror = () => { db.close(); reject(tx.error); };
+    tx.onabort = () => { db.close(); reject(tx.error); };
+  });
+}
+
 const clipKey = (bookId, segmentId) => `${bookId}:${segmentId}`;
 
 export class OfflineLibrary {
   async getBook(id) {
     let book = await transaction(BOOKS, "readonly", store => store.get(id));
-    if (book !== undefined) return book;
+    if (book !== undefined) return isDeletedBook(book) ? undefined : book;
     book = await transaction(BOOKS, "readonly", store => store.get(id), { legacy: true });
-    if (book !== undefined) await this.putBook(book);
-    return book;
+    return book === undefined ? undefined : restoreLegacyBook(book);
   }
 
   async getClip(bookId, segmentId) {
+    // Deleted books must not expose clips retained in the legacy database.
+    const currentBook = await transaction(BOOKS, "readonly", store => store.get(bookId));
+    if (isDeletedBook(currentBook)) return undefined;
     const key = clipKey(bookId, segmentId);
     let clip = await transaction(CLIPS, "readonly", store => store.get(key));
     if (clip !== undefined) return clip;
@@ -87,11 +110,12 @@ export class OfflineLibrary {
   async listBooks() {
     const current = await transaction(BOOKS, "readonly", store => store.getAll()) || [];
     const legacy = await transaction(BOOKS, "readonly", store => store.getAll(), { legacy: true }) || [];
-    const byId = new Map(current.map(book => [book.id, book]));
+    const removedIds = new Set(current.filter(isDeletedBook).map(book => book.id));
+    const byId = new Map(current.filter(book => !isDeletedBook(book)).map(book => [book.id, book]));
     for (const book of legacy) {
-      if (!byId.has(book.id)) {
-        byId.set(book.id, book);
-        await this.putBook(book);
+      if (!byId.has(book.id) && !removedIds.has(book.id)) {
+        const restored = await restoreLegacyBook(book);
+        if (restored) byId.set(book.id, restored);
       }
     }
     return [...byId.values()];
@@ -99,13 +123,13 @@ export class OfflineLibrary {
 
   async removeBook(id) {
     const book = await this.getBook(id);
-    if (book) {
-      for (const clip of book.manifest.clips) {
-        await transaction(CLIPS, "readwrite", store => store.delete(clipKey(id, clip.segmentId)));
-      }
+    // Write the tombstone first so interruption or a subsequent list/get cannot
+    // re-import the old book. A deliberate putBook can later add it again.
+    await transaction(BOOKS, "readwrite", store => store.put({ id, __cvrDeleted: true }, id));
+    for (const clip of book?.manifest?.clips || []) {
+      await transaction(CLIPS, "readwrite", store => store.delete(clipKey(id, clip.segmentId)));
     }
-    await transaction(BOOKS, "readwrite", store => store.delete(id));
-    // Legacy DB is intentionally left intact during the migration window.
+    // Legacy DB remains intact for rollback; the tombstone blocks re-import.
   }
 
   async download(manifest, fetchAudio, onProgress = () => {}) {
