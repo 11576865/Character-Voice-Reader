@@ -35,9 +35,9 @@ def test_service_worker_and_entry_assets_share_explicit_revision():
     index = (ROOT / "web" / "index.html").read_text(encoding="utf-8")
     service_worker = (ROOT / "web" / "sw.js").read_text(encoding="utf-8")
 
-    css_version = re.search(r"reader\\.css\\?v=(\\d+)", index)
-    js_version = re.search(r"reader\\.js\\?v=(\\d+)", index)
-    cache_version = re.search(r"character-voice-reader-shell-v(\\d+)", service_worker)
+    css_version = re.search(r"reader\.css\?v=(\d+)", index)
+    js_version = re.search(r"reader\.js\?v=(\d+)", index)
+    cache_version = re.search(r"character-voice-reader-shell-v(\d+)", service_worker)
     assert css_version and js_version and cache_version
     assert css_version.group(1) == js_version.group(1) == cache_version.group(1)
     assert int(cache_version.group(1)) >= 5
