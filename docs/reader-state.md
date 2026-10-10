@@ -193,3 +193,11 @@ finished
 - 对正在等待 `getBook()` 返回的离线书籍，删除通知会推进文档来源序号，阻止过期异步结果重新打开被删除的书籍。若 `pagehide` 关闭通知监听后由 BFCache 恢复，在 `pageshow` 重新监听、刷新列表，并重新校验正在打开的离线书籍，避免页面冻结期间漏掉删除通知。
 - Chromium 双页回归包含实际 PCM WAV 播放中由另一页提交删除，确认另一页音频停止、正文清空和播放入口禁用；另测不相关删除不会停止播放、旧的异步打开结果在收到通知后不能复活书籍，以及缺少 BroadcastChannel 时的 storage-event 退化路径。
 - 约束：通知是同源活跃标签页的尽力投递机制；关闭的页面、浏览器进程丢失、无 BroadcastChannel 且禁用 localStorage 的环境无法获得保证。BFCache 恢复时的数据库复查改善一致性，但这仍不是跨设备广播或服务器撤销机制。删除之前完成的合法读取可能曾经播放，无法追溯撤销。Safari/Firefox 和真实移动端仍需独立验证。
+
+## v14：BFCache 恢复时的未完成离线打开请求（2026-10-10）
+
+- 上一版跨标签页删除监听在 `pagehide` 关闭、`pageshow` 重建，并验证已打开的离线书籍。然而**尚未完成的 `getBook()` 打开请求**并不属于 `offlineMode`，因此浏览器在休眠期间错过删除通知后，先前已读取但迟到的结果仍可能把删除的书籍重新加载进 Reader。
+- 现在 `pagehide` 检测 `pendingOfflineOpenId`：在休眠前执行统一的 `stopForSourceChange()`，推进 `importSerial` 使旧异步结果失效；仅将书籍 ID 作为 `suspendedOfflineOpenId` 保存，不保存可能过期的书籍对象。恢复后的 `pageshow` 使用 `openOfflineBook(id)` **重新读取 IndexedDB**，由既有墓碑校验决定是否允许打开。若书籍已删除，保留关闭状态并显示打开失败；若仍存在，则恢复正常打开。
+- 在休眠和恢复之间发生的新的手动文本或其他来源选择会清除挂起的恢复意图，遵守“最新用户意图优先”，而不是被自动恢复的旧书覆盖。已打开的离线书籍仍由原有 `pageshow` 存活检查保护。
+- Chromium 回归通过显式触发 `PageTransitionEvent(pagehide/pageshow, persisted=true)` 模拟生命周期，延迟第一个 `getBook()`，在另一页面删除旧书，验证恢复后重新查询并拒绝迟到旧值；另覆盖未删除时可恢复，以及休眠期间主动切换文本后不得自动重新打开。
+- 证据边界：这里使用真实 Chromium + IndexedDB 和**合成 PageTransitionEvent** 测试 Reader 的生命周期处理代码，不等同于浏览器确实把页面放入 BFCache；真实 BFCache 驻留、浏览器事件调度、OS 休眠及 Safari/Firefox/移动端仍需分别验收。
