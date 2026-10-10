@@ -309,15 +309,20 @@ function renderGenerationHistory(items) {
 }
 
 async function loadGenerationHistory() {
+  const serial = importSerial;
+  const bookId = currentBookId;
   try {
-    const endpoint = currentBookId
-      ? `/v1/books/${currentBookId}/generation-history?limit=30`
+    const endpoint = bookId
+      ? `/v1/books/${bookId}/generation-history?limit=30`
       : "/v1/generation-history?limit=30";
     const response = await libraryFetch(endpoint);
     const payload = await response.json();
+    if (serial !== importSerial || bookId !== currentBookId) return;
     renderGenerationHistory(payload.items || []);
   } catch (error) {
-    ui.generationHistory.textContent = `生成历史不可用：${error.message}`;
+    if (serial === importSerial && bookId === currentBookId) {
+      ui.generationHistory.textContent = `生成历史不可用：${error.message}`;
+    }
   }
 }
 
@@ -1783,8 +1788,11 @@ async function syncOfflineChanges() {
 
 async function pollJob() {
   if (!currentBookId) return;
+  const serial = importSerial;
+  const bookId = currentBookId;
   try {
-    const job = await (await libraryFetch(`/v1/books/${currentBookId}/job`)).json();
+    const job = await (await libraryFetch(`/v1/books/${bookId}/job`)).json();
+    if (serial !== importSerial || currentBookId !== bookId) return;
     const failed = job.failed_segment;
     const failedLabel = failed
       ? ` · 失败位置：第 ${Number(failed.chapterIndex) + 1} 章，第 ${Number(failed.paragraphIndex) + 1} 段`
@@ -1803,7 +1811,9 @@ async function pollJob() {
       await loadGenerationHistory();
     }
   } catch (error) {
-    ui.jobStatus.textContent = `任务查询失败：${error.message}`;
+    if (serial === importSerial && currentBookId === bookId) {
+      ui.jobStatus.textContent = `任务查询失败：${error.message}`;
+    }
   }
 }
 
