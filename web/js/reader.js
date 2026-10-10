@@ -2240,9 +2240,20 @@ document.addEventListener("visibilitychange", () => {
 });
 window.addEventListener("pagehide", () => saveProgress(true));
 window.addEventListener("online", syncOfflineChanges);
-const stopOfflineDeletionObserver =
+let stopOfflineDeletionObserver =
   observeOfflineBookDeletions(onRemoteOfflineBookDeleted);
-window.addEventListener("pagehide", stopOfflineDeletionObserver, { once: true });
+window.addEventListener("pagehide", () => {
+  stopOfflineDeletionObserver?.();
+  stopOfflineDeletionObserver = null;
+});
+window.addEventListener("pageshow", () => {
+  // A back/forward-cache restoration reuses this module after pagehide.
+  if (!stopOfflineDeletionObserver) {
+    stopOfflineDeletionObserver =
+      observeOfflineBookDeletions(onRemoteOfflineBookDeleted);
+    void renderOfflineBooks(); // Catch deletions missed while the page was frozen.
+  }
+});
 render();
 try {
   ui.fontSize.value = readMigratedStorage(
