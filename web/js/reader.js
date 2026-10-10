@@ -45,6 +45,10 @@ const ui = {
   jobStatus: element("jobStatus"), downloadBook: element("downloadBook"),
   cancelOfflineDownload: element("cancelOfflineDownload"),
   offlineLibraryStatus: element("offlineLibraryStatus"),
+  offlineSearch: element("offlineSearch"),
+  offlineFilter: element("offlineFilter"),
+  offlineSort: element("offlineSort"),
+  offlineClearFilters: element("offlineClearFilters"),
   refreshOfflineBooks: element("refreshOfflineBooks"),
   offlineDownloadIndicator: element("offlineDownloadIndicator"),
   offlineDownloadProgress: element("offlineDownloadProgress"),
@@ -172,6 +176,7 @@ let jobPoll = null;
 let offlineMode = false;
 let offlineDownload = null;
 let offlineListRevision = 0;
+let offlineBooksSnapshot = [];
 let previewAudio = null;
 let annotations = {};
 let selectedParagraph = null;
@@ -1403,106 +1408,156 @@ async function loadLibrary() {
   await renderOfflineBooks();
 }
 
+function offlineVisibleBooks() {
+  const query = ui.offlineSearch.value.trim().normalize("NFKC").toLocaleLowerCase();
+  const status = ui.offlineFilter.value;
+  const visible = offlineBooksSnapshot.filter(book => {
+    if (status === "ready" && !book.ready) return false;
+    if (status === "partial" && book.ready) return false;
+    const haystack = `${book.title || ""} ${book.author || ""}`
+      .normalize("NFKC").toLocaleLowerCase();
+    return !query || haystack.includes(query);
+  });
+  const titleOrder = (a, b) =>
+    String(a.title || "").localeCompare(String(b.title || ""), "zh-Hans-CN",
+      { numeric: true, sensitivity: "base" });
+  const completion = book => book.ready ? 1 :
+    (Array.isArray(book.manifest?.clips) && book.manifest.clips.length
+      ? Math.max(0, Math.min(1, (Number(book.downloaded) || 0) / book.manifest.clips.length))
+      : 0);
+  visible.sort(ui.offlineSort.value === "progress"
+    ? (a, b) => completion(b) - completion(a) || titleOrder(a, b)
+    : titleOrder);
+  return visible;
+}
+
+function renderOfflineBookRows() {
+  // Search, filtering and sorting use the last completed IndexedDB snapshot.
+  // Avoid an asynchronous fetch or empty-list flash on every keystroke.
+  const books = offlineVisibleBooks();
+  ui.offlineClearFilters.disabled = !ui.offlineSearch.value.trim() &&
+    ui.offlineFilter.value === "all";
+  ui.offlineBooks.replaceChildren();
+  if (!offlineBooksSnapshot.length || !books.length) {
+    const empty = document.createElement("p");
+    empty.className = "offline-empty";
+    empty.textContent = offlineBooksSnapshot.length
+      ? "没有符合搜索或筛选条件的本机书籍。可清空搜索或选择“全部书籍”。"
+      : "暂无本机离线书籍。连接电脑后，在“我的书库与整书生成”中下载书籍。";
+    ui.offlineBooks.appendChild(empty);
+  } else {
+      for (const book of books) {
+        const row = document.createElement("article");
+        row.className = "offline-book-row";
+        const information = document.createElement("div");
+        information.className = "offline-book-info";
+        const title = document.createElement("strong");
+        title.textContent = book.title || "未命名书籍";
+        const description = document.createElement("span");
+        const count = Array.isArray(book.manifest?.clips) ? book.manifest.clips.length : 0;
+        const completed = Math.max(0, Math.min(count, Number(book.downloaded) || 0));
+        description.textContent = book.ready ? "已下载完成 · 可离线朗读"
+          : count ? `已下载 ${completed}/${count} 段 · 仅部分可离线`
+            : "旧版或不完整记录 · 可尝试打开";
+        information.append(title, description);
+        if (book.author) {
+          const author = document.createElement("span");
+          author.textContent = `作者：${book.author}`;
+          information.appendChild(author);
+        }
+        if (!book.ready && count) {
+          const progress = document.createElement("progress");
+          progress.max = count;
+          progress.value = completed;
+          progress.setAttribute("aria-label", `${book.title || "书籍"}已下载片段`);
+          information.appendChild(progress);
+        }
+        const actions = document.createElement("div");
+        actions.className = "offline-book-actions";
+        const open = document.createElement("button");
+        open.type = "button";
+        open.textContent = "打开阅读";
+        open.disabled = !book.document || !Array.isArray(book.segments);
+        open.addEventListener("click", () => openOfflineBook(book.id));
+        const remove = document.createElement("button");
+        remove.type = "button";
+        remove.className = "danger-subtle";
+        remove.textContent = "删除本机副本";
+        const confirmation = document.createElement("div");
+        confirmation.className = "offline-confirm";
+        confirmation.hidden = true;
+        const warning = document.createElement("span");
+        warning.textContent = "确定删除这本书及本机音频？电脑书库不受影响。";
+        const confirm = document.createElement("button");
+        confirm.type = "button";
+        confirm.className = "danger-subtle";
+        confirm.textContent = "确认删除";
+        const cancel = document.createElement("button");
+        cancel.type = "button";
+        cancel.textContent = "保留书籍";
+        const resetConfirmation = () => {
+          confirmation.hidden = true;
+          remove.hidden = false;
+          remove.focus();
+        };
+        remove.addEventListener("click", () => {
+          remove.hidden = true;
+          confirmation.hidden = false;
+          confirm.focus();
+        });
+        cancel.addEventListener("click", resetConfirmation);
+        confirmation.addEventListener("keydown", event => {
+          if (event.key === "Escape") {
+            event.preventDefault();
+            resetConfirmation();
+          }
+        });
+        confirm.addEventListener("click", async () => {
+          confirm.disabled = true;
+          cancel.disabled = true;
+          ++offlineListRevision; // An earlier list request cannot redraw a deleted row.
+          try {
+            if (offlineDownload?.bookId === book.id) offlineDownload.controller.abort();
+            await offlineLibrary.removeBook(book.id);
+            if (offlineMode && currentBookId === book.id) {
+              stopForSourceChange();
+              showDocument({ title: "", chapters: [{ title: "正文", paragraphs: [] }] },
+                { author: "" }, null, "未加载");
+            }
+            await renderOfflineBooks();
+            ui.offlineLibraryStatus.textContent = `已删除《${book.title || "未命名书籍"}》的本机副本。`;
+          } catch (error) {
+            confirm.disabled = false;
+            cancel.disabled = false;
+            ui.refreshOfflineBooks.disabled = false;
+            ui.offlineLibraryStatus.textContent = `本机副本删除失败：${error.message}`;
+          }
+        });
+        confirmation.append(warning, confirm, cancel);
+        actions.append(open, remove, confirmation);
+        row.append(information, actions);
+        ui.offlineBooks.appendChild(row);
+      }
+  }
+  const finished = offlineBooksSnapshot.filter(book => book.ready).length;
+  ui.offlineLibraryStatus.textContent = offlineBooksSnapshot.length
+    ? `显示 ${books.length}/${offlineBooksSnapshot.length} 本 · ${finished} 本已完成下载。`
+    : "当前浏览器尚未保存离线书籍。";
+}
+
 async function renderOfflineBooks() {
   const revision = ++offlineListRevision;
-  ui.offlineBooks.replaceChildren();
-  ui.offlineLibraryStatus.textContent = "正在读取本机书库……";
+  // Keep old cards visible during refresh, including their active actions.
+  ui.offlineLibraryStatus.textContent = "正在刷新本机书库……";
   ui.refreshOfflineBooks.disabled = true;
   try {
     const books = await offlineLibrary.listBooks();
     if (revision !== offlineListRevision) return;
-    if (!books.length) {
-      const empty = document.createElement("p");
-      empty.className = "offline-empty";
-      empty.textContent = "暂无本机离线书籍。连接电脑后，在“我的书库与整书生成”中下载书籍。";
-      ui.offlineBooks.appendChild(empty);
-      ui.offlineLibraryStatus.textContent = "当前浏览器尚未保存离线书籍。";
-      return;
-    }
-    for (const book of books) {
-      const row = document.createElement("article");
-      row.className = "offline-book-row";
-      const information = document.createElement("div");
-      information.className = "offline-book-info";
-      const title = document.createElement("strong");
-      title.textContent = book.title || "未命名书籍";
-      const description = document.createElement("span");
-      const count = Array.isArray(book.manifest?.clips) ? book.manifest.clips.length : 0;
-      const completed = Math.max(0, Math.min(count, Number(book.downloaded) || 0));
-      description.textContent = book.ready ? "已下载完成 · 可离线朗读"
-        : count ? `已下载 ${completed}/${count} 段 · 仅部分可离线`
-          : "旧版或不完整记录 · 可尝试打开";
-      information.append(title, description);
-      if (!book.ready && count) {
-        const progress = document.createElement("progress");
-        progress.max = count;
-        progress.value = completed;
-        progress.setAttribute("aria-label", `${book.title || "书籍"}已下载片段`);
-        information.appendChild(progress);
-      }
-      const actions = document.createElement("div");
-      actions.className = "offline-book-actions";
-      const open = document.createElement("button");
-      open.type = "button";
-      open.textContent = "打开阅读";
-      open.disabled = !book.document || !Array.isArray(book.segments);
-      open.addEventListener("click", () => openOfflineBook(book.id));
-      const remove = document.createElement("button");
-      remove.type = "button";
-      remove.className = "danger-subtle";
-      remove.textContent = "删除本机副本";
-      const confirmation = document.createElement("div");
-      confirmation.className = "offline-confirm";
-      confirmation.hidden = true;
-      const warning = document.createElement("span");
-      warning.textContent = "确定删除这本书及本机音频？电脑书库不受影响。";
-      const confirm = document.createElement("button");
-      confirm.type = "button";
-      confirm.className = "danger-subtle";
-      confirm.textContent = "确认删除";
-      const cancel = document.createElement("button");
-      cancel.type = "button";
-      cancel.textContent = "保留书籍";
-      const resetConfirmation = () => {
-        confirmation.hidden = true;
-        remove.hidden = false;
-        remove.focus();
-      };
-      remove.addEventListener("click", () => {
-        remove.hidden = true;
-        confirmation.hidden = false;
-        confirm.focus();
-      });
-      cancel.addEventListener("click", resetConfirmation);
-      confirm.addEventListener("click", async () => {
-        confirm.disabled = true;
-        cancel.disabled = true;
-        ++offlineListRevision; // An earlier list request cannot redraw a deleted row.
-        try {
-          if (offlineDownload?.bookId === book.id) offlineDownload.controller.abort();
-          await offlineLibrary.removeBook(book.id);
-          if (offlineMode && currentBookId === book.id) {
-            stopForSourceChange();
-            showDocument({ title: "", chapters: [{ title: "正文", paragraphs: [] }] },
-              { author: "" }, null, "未加载");
-          }
-          await renderOfflineBooks();
-          ui.offlineLibraryStatus.textContent = `已删除《${book.title || "未命名书籍"}》的本机副本。`;
-        } catch (error) {
-          confirm.disabled = false;
-          cancel.disabled = false;
-          ui.offlineLibraryStatus.textContent = `本机副本删除失败：${error.message}`;
-        }
-      });
-      confirmation.append(warning, confirm, cancel);
-      actions.append(open, remove, confirmation);
-      row.append(information, actions);
-      ui.offlineBooks.appendChild(row);
-    }
-    ui.offlineLibraryStatus.textContent = `本设备保存了 ${books.length} 本书籍。`;
+    offlineBooksSnapshot = books;
+    renderOfflineBookRows();
   } catch (error) {
     if (revision === offlineListRevision) {
-      ui.offlineLibraryStatus.textContent = `离线书库不可用：${error.message}`;
+      ui.offlineLibraryStatus.textContent = `离线书库读取失败：${error.message}；仍显示上次读取的书籍。`;
     }
   } finally {
     if (revision === offlineListRevision) ui.refreshOfflineBooks.disabled = false;
@@ -2042,6 +2097,15 @@ ui.retryGeneration.addEventListener("click", retryWholeBook);
 ui.suggestSpeakers.addEventListener("click", loadSpeakerSuggestions);
 ui.downloadBook.addEventListener("click", downloadWholeBook);
 ui.refreshOfflineBooks.addEventListener("click", renderOfflineBooks);
+ui.offlineSearch.addEventListener("input", renderOfflineBookRows);
+ui.offlineFilter.addEventListener("change", renderOfflineBookRows);
+ui.offlineSort.addEventListener("change", renderOfflineBookRows);
+ui.offlineClearFilters.addEventListener("click", () => {
+  ui.offlineSearch.value = "";
+  ui.offlineFilter.value = "all";
+  renderOfflineBookRows();
+  ui.offlineSearch.focus();
+});
 ui.cancelOfflineDownload.addEventListener("click", () => offlineDownload?.controller.abort());
 ui.exportEpub.addEventListener("click", exportEpub);
 ui.exportWav.addEventListener("click", exportWav);
