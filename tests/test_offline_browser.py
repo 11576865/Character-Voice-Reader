@@ -565,6 +565,44 @@ def check_real_offline_audio_playback(browser, origin):
         context.close()
 
 
+
+def check_mobile_touch_reader_controls(browser, origin):
+    """Small touch viewport preserves readable layout and secondary-action disclosure."""
+    context = browser.new_context(
+        viewport={"width": 360, "height": 780},
+        device_scale_factor=2,
+        is_mobile=True,
+        has_touch=True
+    )
+    page = context.new_page()
+    errors = []
+    page.on("pageerror", lambda error: errors.append(str(error)))
+    try:
+        page.goto(origin + "/reader-ui", wait_until="domcontentloaded")
+        page.locator("#manualPanel > summary").tap()
+        page.locator("#text").fill("这是移动端触屏阅读测试的正文。")
+        page.locator("#useManual").tap()
+        page.wait_for_function("""() => document.querySelector("#source")
+          .textContent.includes("手动输入")""")
+        assert "移动端触屏阅读测试" in page.locator("#documentBody").inner_text()
+        metrics = page.evaluate("""() => ({
+          viewport: document.documentElement.clientWidth,
+          scroll: document.documentElement.scrollWidth,
+          bar: document.querySelector(".playback-bar").getBoundingClientRect().width
+        })""")
+        assert metrics["scroll"] <= metrics["viewport"] + 1, \
+            "Reader must not create horizontal page scroll on mobile: " + repr(metrics)
+        assert page.locator(".playback-more > summary").is_visible()
+        page.locator(".playback-more > summary").tap()
+        assert page.locator("#previousChapter").is_visible()
+        assert page.locator("#previewSelection").is_visible()
+        page.locator(".playback-more > summary").tap()
+        assert not page.locator(".playback-more").evaluate("(node) => node.open")
+        assert not errors, "Touch UI raised JS errors: " + repr(errors)
+    finally:
+        context.close()
+
+
 def main():
     # Keep the optional Playwright dependency out of the default pytest collection.
     from playwright.sync_api import sync_playwright
@@ -584,6 +622,7 @@ def main():
                 check_offline_shelf_ui_without_service(browser, origin)
                 check_late_book_open_cannot_replace_newer_source(browser, origin)
                 check_real_offline_audio_playback(browser, origin)
+                check_mobile_touch_reader_controls(browser, origin)
             finally:
                 browser.close()
     finally:
