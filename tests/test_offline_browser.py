@@ -280,6 +280,9 @@ def check_offline_shelf_ui_without_service(browser, origin):
         row.get_by_text("离线阅读示例").wait_for()
         assert page.locator("#voice").evaluate("(el) => !el.value"), "no server voice catalog expected"
         row.get_by_role("button", name="打开阅读").click()
+        # IndexedDB book opening is asynchronous: wait for a conclusive UI state.
+        page.wait_for_function("""() => !document.querySelector("#start").disabled ||
+          document.querySelector("#offlineLibraryStatus").textContent.includes("打开失败")""")
         assert not page.locator("#start").is_disabled(), (
             "offline playback must not require voice catalog; "
             + "shelf=" + page.locator("#offlineLibraryStatus").inner_text()
