@@ -6,7 +6,7 @@ import { ReaderQueue } from "./queue.js";
 import { ProgressStore, documentIdForFile } from "./progress.js";
 import { ReaderNavigation, chapterStart, chapterPosition } from "./navigation.js";
 import { VariantStore } from "./variants.js";
-import { OfflineLibrary } from "./offline.js";
+import { OfflineLibrary, observeOfflineBookDeletions } from "./offline.js";
 import { fetchJson, fetchSpeech } from "./api.js";
 
 const element = id => document.getElementById(id);
@@ -178,6 +178,7 @@ let sourceBuffer = null;
 let sourceKind = null;
 let jobPoll = null;
 let offlineMode = false;
+let pendingOfflineOpenId = null;
 let offlineDownload = null;
 let offlineListRevision = 0;
 let offlineBooksSnapshot = [];
@@ -986,6 +987,7 @@ function stopForSourceChange() {
   // Every awaited source read must check this revision before touching the UI.
   ++importSerial;
   loading = false;
+  pendingOfflineOpenId = null;
   clearTimeout(jobPoll);
   jobPoll = null;
   offlineDownload?.controller.abort();
@@ -1572,6 +1574,7 @@ async function renderOfflineBooks() {
 async function openOfflineBook(bookId) {
   stopForSourceChange();
   const serial = importSerial;
+  pendingOfflineOpenId = bookId;
   loading = true;
   render();
   try {
@@ -1608,10 +1611,33 @@ async function openOfflineBook(bookId) {
     }
   } finally {
     if (serial === importSerial) {
+      pendingOfflineOpenId = null;
       loading = false;
       render();
     }
   }
+}
+
+// Only invalidate the selected offline book (or a pending open of it).
+// Never stop a different source because another tab deleted an unrelated book.
+function onRemoteOfflineBookDeleted(bookId) {
+  if (offlineDownload?.bookId === bookId) offlineDownload.controller.abort();
+  const affected = pendingOfflineOpenId === bookId ||
+    (offlineMode && currentBookId === bookId);
+  if (affected) {
+    stopForSourceChange();
+    showDocument({ title: "", chapters: [{ title: "正文", paragraphs: [] }] },
+      { author: "" }, null, "未加载");
+    statusOverride = "本机书籍已在另一个标签页删除，朗读已停止。";
+    render();
+  }
+  // Also refresh other tabs' shelf cards and counts on confirmed deletion.
+  void renderOfflineBooks().then(() => {
+    if (affected) {
+      ui.offlineLibraryStatus.textContent =
+        "本机书籍已在另一个标签页删除；已停止朗读并退出该书。";
+    }
+  });
 }
 
 function storageMiB(bytes) {
@@ -2214,6 +2240,28 @@ document.addEventListener("visibilitychange", () => {
 });
 window.addEventListener("pagehide", () => saveProgress(true));
 window.addEventListener("online", syncOfflineChanges);
+let stopOfflineDeletionObserver =
+  observeOfflineBookDeletions(onRemoteOfflineBookDeleted);
+window.addEventListener("pagehide", () => {
+  stopOfflineDeletionObserver?.();
+  stopOfflineDeletionObserver = null;
+});
+window.addEventListener("pageshow", () => {
+  // A back/forward-cache restoration reuses this module after pagehide.
+  if (!stopOfflineDeletionObserver) {
+    stopOfflineDeletionObserver =
+      observeOfflineBookDeletions(onRemoteOfflineBookDeleted);
+    void renderOfflineBooks(); // Reconcile any shelf updates while frozen.
+    if (offlineMode && currentBookId) {
+      const bookId = currentBookId;
+      void offlineLibrary.getBook(bookId).then(book => {
+        if (!book && offlineMode && currentBookId === bookId) {
+          onRemoteOfflineBookDeleted(bookId);
+        }
+      }).catch(() => { /* A temporary storage error is not proof of deletion. */ });
+    }
+  }
+});
 render();
 try {
   ui.fontSize.value = readMigratedStorage(

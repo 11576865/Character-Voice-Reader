@@ -1,4 +1,4 @@
-const CACHE = "character-voice-reader-shell-v12";
+const CACHE = "character-voice-reader-shell-v13";
 const SHELL = ["/", "/reader-assets/reader.css", "/reader-assets/js/reader.js",
   "/reader-assets/js/sources.js", "/reader-assets/js/epub_source.js",
   "/reader-assets/js/segmenter.js", "/reader-assets/js/player.js",
