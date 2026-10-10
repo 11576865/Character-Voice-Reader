@@ -856,7 +856,8 @@ function render(snapshot = queue.snapshot) {
   ui.referenceId.disabled = active || loading || !ui.referenceId.options.length;
   ui.speed.disabled = active || loading;
   ui.prefetchAhead.disabled = active || loading;
-  ui.useManual.disabled = loading;
+  // Switching to manual text must stay available while an older file is loading.
+  ui.useManual.disabled = false;
   ui.previousSegment.disabled = !hasDocument || loading || awaitingChoice || index <= 0;
   ui.nextSegment.disabled = !hasDocument || loading || awaitingChoice || index >= segments.length - 1;
   ui.regenerateParagraph.disabled = !hasDocument || loading || awaitingChoice || !ui.voice.value || offlineMode;
