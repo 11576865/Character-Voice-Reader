@@ -629,6 +629,118 @@ def check_mobile_touch_reader_controls(browser, origin):
         context.close()
 
 
+
+def check_offline_shelf_search_filter_sort_and_refresh(browser, origin):
+    """Search is client-side, partial downloads are discoverable, and refresh does not flash."""
+    context = browser.new_context(viewport={"width": 360, "height": 780})
+    page = context.new_page()
+    errors = []
+    page.on("pageerror", lambda error: errors.append(str(error)))
+    try:
+        page.goto(origin + "/reader-ui", wait_until="domcontentloaded")
+        page.get_by_text("暂无本机离线书籍", exact=False).wait_for()
+        page.evaluate("""async () => {
+          const { OfflineLibrary } = await import("/reader-assets/js/offline.js");
+          const library = new OfflineLibrary();
+          const rows = [
+            ["a", "Alpha", "Ada", false, 1, 2],
+            ["b", "Beta", "张乙", true, 1, 1],
+            ["c", "Gamma", "林甲", true, 2, 2]
+          ];
+          for (const [suffix, title, author, ready, downloaded, count] of rows) {
+            const id = "b-" + suffix.repeat(24);
+            const document = { title, chapters: [
+              { title: "正文", paragraphs: ["这是 " + title + " 的段落。"] }
+            ] };
+            await library.putBook({
+              id, title, author, kind: "epub", document,
+              segments: [{ id: suffix + "-segment", index: 0 }],
+              manifest: { clips: Array.from({ length: count }, (_, i) =>
+                ({ segmentId: suffix + "-" + i })) },
+              ready, downloaded
+            });
+          }
+        }""")
+        page.locator("#refreshOfflineBooks").click()
+        page.wait_for_function("""() =>
+          document.querySelectorAll(".offline-book-row").length === 3""")
+        rows = page.locator(".offline-book-row")
+        assert rows.count() == 3
+        assert [rows.nth(i).locator("strong").inner_text() for i in range(3)] == [
+            "Alpha", "Beta", "Gamma"
+        ], "Title sort must be deterministic"
+        assert "3/3" in page.locator("#offlineLibraryStatus").inner_text()
+
+        # Search matches author, not only title. Status filter intersects query.
+        page.locator("#offlineSearch").fill("Ada")
+        assert rows.count() == 1
+        assert rows.first.locator("strong").inner_text() == "Alpha"
+        assert "1/3" in page.locator("#offlineLibraryStatus").inner_text()
+        page.locator("#offlineFilter").select_option("ready")
+        page.get_by_text("没有符合搜索或筛选条件", exact=False).wait_for()
+        assert rows.count() == 0
+        assert "0/3" in page.locator("#offlineLibraryStatus").inner_text()
+        page.locator("#offlineFilter").select_option("partial")
+        assert rows.count() == 1
+        assert rows.first.locator("strong").inner_text() == "Alpha"
+        page.locator("#offlineSearch").fill("林甲")
+        assert rows.count() == 0
+        page.locator("#offlineFilter").select_option("all")
+        assert rows.count() == 1
+        assert rows.first.locator("strong").inner_text() == "Gamma"
+
+        page.locator("#offlineSearch").fill("")
+        page.locator("#offlineSort").select_option("progress")
+        assert [rows.nth(i).locator("strong").inner_text() for i in range(3)] == [
+            "Beta", "Gamma", "Alpha"
+        ], "Completed books first; tie-break by title"
+
+        # Delaying IndexedDB listing must not remove cards or reset user input.
+        page.evaluate("""async () => {
+          const { OfflineLibrary } = await import("/reader-assets/js/offline.js");
+          const original = OfflineLibrary.prototype.listBooks;
+          window.shelfRefreshPending = false;
+          window.restoreShelfListing = () => {
+            OfflineLibrary.prototype.listBooks = original;
+          };
+          OfflineLibrary.prototype.listBooks = function(...args) {
+            window.shelfRefreshPending = true;
+            return new Promise(resolve => {
+              window.releaseShelfRefresh = () => original.apply(this, args).then(resolve);
+            });
+          };
+        }""")
+        page.locator("#refreshOfflineBooks").click()
+        page.wait_for_function("window.shelfRefreshPending")
+        assert rows.count() == 3, "Refreshing must not blank the previous shelf"
+        page.locator("#offlineSearch").fill("张乙")
+        assert rows.count() == 1
+        assert rows.first.locator("strong").inner_text() == "Beta"
+        page.evaluate("""async () => {
+          window.restoreShelfListing();
+          await window.releaseShelfRefresh();
+        }""")
+        page.wait_for_function("""() =>
+          !document.querySelector("#refreshOfflineBooks").disabled""")
+        assert page.locator("#offlineSearch").input_value() == "张乙"
+        assert rows.count() == 1
+
+        # Filtering and deletion should continue to respect the selected scope.
+        page.locator("#offlineSearch").fill("Ada")
+        page.locator("#offlineFilter").select_option("partial")
+        assert rows.count() == 1
+        rows.first.get_by_role("button", name="删除本机副本").click()
+        rows.first.get_by_role("button", name="确认删除").click()
+        page.get_by_text("没有符合搜索或筛选条件", exact=False).wait_for()
+        page.locator("#offlineSearch").fill("")
+        page.locator("#offlineFilter").select_option("all")
+        assert rows.count() == 2
+        assert "2/2" in page.locator("#offlineLibraryStatus").inner_text()
+        assert not errors, "Offline shelf interaction raised errors: " + repr(errors)
+    finally:
+        context.close()
+
+
 def main():
     # Keep the optional Playwright dependency out of the default pytest collection.
     from playwright.sync_api import sync_playwright
@@ -649,6 +761,7 @@ def main():
                 check_late_book_open_cannot_replace_newer_source(browser, origin)
                 check_real_offline_audio_playback(browser, origin)
                 check_mobile_touch_reader_controls(browser, origin)
+                check_offline_shelf_search_filter_sort_and_refresh(browser, origin)
             finally:
                 browser.close()
     finally:
