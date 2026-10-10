@@ -280,8 +280,13 @@ def check_offline_shelf_ui_without_service(browser, origin):
         row.get_by_text("离线阅读示例").wait_for()
         assert page.locator("#voice").evaluate("(el) => !el.value"), "no server voice catalog expected"
         row.get_by_role("button", name="打开阅读").click()
-        assert not page.locator("#start").is_disabled(), \
-            "cached offline playback must not require an online voice catalog"
+        assert not page.locator("#start").is_disabled(), (
+            "offline playback must not require voice catalog; "
+            + "shelf=" + page.locator("#offlineLibraryStatus").inner_text()
+            + " | playback=" + page.locator("#status").inner_text()
+            + " | source=" + page.locator("#source").inner_text()
+            + " | errors=" + repr(errors)
+        )
         assert "整本书已可离线听读" in page.locator("#status").inner_text()
 
         # Deletion requires explicit confirmation and allows cancellation.
