@@ -965,6 +965,12 @@ function showDocument(model, metadata, id, label) {
 }
 
 function stopForSourceChange() {
+  // A single revision fences TXT/EPUB imports, local books and remote books.
+  // Every awaited source read must check this revision before touching the UI.
+  ++importSerial;
+  loading = false;
+  clearTimeout(jobPoll);
+  jobPoll = null;
   offlineDownload?.controller.abort();
   regenerationController?.abort();
   regenerationController = null;
@@ -976,8 +982,8 @@ function stopForSourceChange() {
 
 async function importFile(file, kind) {
   if (!file) return;
-  const serial = ++importSerial;
   stopForSourceChange();
+  const serial = importSerial;
   loading = true;
   statusOverride = null;
   render();
@@ -1004,7 +1010,6 @@ async function importFile(file, kind) {
 }
 
 function useManualText() {
-  ++importSerial;
   stopForSourceChange();
   sourceBuffer = null;
   sourceKind = "manual";
@@ -1053,8 +1058,8 @@ async function importDocument(file) {
   if (!file) return;
   const kind = file.name.split(".").at(-1).toLowerCase();
   if (!["txt", "md", "docx"].includes(kind)) return;
-  const serial = ++importSerial;
   stopForSourceChange();
+  const serial = importSerial;
   loading = true;
   render();
   try {
@@ -1497,8 +1502,13 @@ async function renderOfflineBooks() {
 }
 
 async function openOfflineBook(bookId) {
+  stopForSourceChange();
+  const serial = importSerial;
+  loading = true;
+  render();
   try {
     const book = await offlineLibrary.getBook(bookId);
+    if (serial !== importSerial) return;
     if (!book) throw new Error("这本书已从本机删除。");
     if (!book.document || !Array.isArray(book.segments)) {
       throw new Error("本机记录缺少可读取的正文，请重新下载。");
@@ -1506,7 +1516,7 @@ async function openOfflineBook(bookId) {
     if (!ui.voice.options.length && book.manifest?.voices?.length) {
       installVoices({ voices: book.manifest.voices });
     }
-    stopForSourceChange();
+    loading = false;
     sourceBuffer = null;
     sourceKind = book.kind;
     showDocument(book.document, { author: book.author },
@@ -1525,7 +1535,14 @@ async function openOfflineBook(bookId) {
     statusOverride = book.ready ? "整本书已可离线听读。" : "部分章节已下载；缺失段落离线不可播放。";
     render(); // Recalculate play availability now that this is an offline session.
   } catch (error) {
-    ui.offlineLibraryStatus.textContent = `本机书籍打开失败：${error.message}`;
+    if (serial === importSerial) {
+      ui.offlineLibraryStatus.textContent = `本机书籍打开失败：${error.message}`;
+    }
+  } finally {
+    if (serial === importSerial) {
+      loading = false;
+      render();
+    }
   }
 }
 
@@ -1676,10 +1693,15 @@ async function saveCurrentBook() {
 
 async function openBook(bookId) {
   stopForSourceChange();
+  const serial = importSerial;
+  loading = true;
+  render();
   try {
     const book = await (await libraryFetch(`/v1/books/${bookId}`)).json();
+    if (serial !== importSerial) return;
     sourceBuffer = null;
     sourceKind = book.kind;
+    loading = false;
     showDocument(book.document, { author: book.author },
       book.clientDocumentId || `book:${bookId}`, `书库：${book.title}`);
     currentBookId = bookId;
@@ -1688,14 +1710,19 @@ async function openBook(bookId) {
     pronunciations = book.pronunciations || {};
     pronunciationsUpdatedAt = book.pronunciationsUpdatedAt || null;
     const cachedOffline = await offlineLibrary.getBook(bookId).catch(() => null);
+    if (serial !== importSerial) return;
     offlineAudioVersion = cachedOffline?.pronunciationsUpdatedAt || null;
     offlineAnnotationsSignature = JSON.stringify(cachedOffline?.annotations || {});
     renderPronunciations();
     await refreshBookVersions();
+    if (serial !== importSerial) return;
     renderBody();
     const serverProgress = await (await libraryFetch(`/v1/books/${bookId}/progress`)).json();
+    if (serial !== importSerial) return;
     const localProgress = progressStore.load(documentId, currentDocument, segments);
     if (serverProgress.segmentIndex !== undefined &&
+        Number.isInteger(serverProgress.segmentIndex) &&
+        segments[serverProgress.segmentIndex] &&
         (!localProgress || serverProgress.updatedAt > localProgress.updatedAt) &&
         window.confirm("书库中有较新的阅读位置，是否从那里继续？")) {
       navigation.lastIndex = serverProgress.segmentIndex;
@@ -1707,9 +1734,15 @@ async function openBook(bookId) {
       render();
     }
     await pollJob();
+    if (serial !== importSerial) return;
     await loadGenerationHistory();
   } catch (error) {
-    ui.jobStatus.textContent = `打开失败：${error.message}`;
+    if (serial === importSerial) ui.jobStatus.textContent = `打开失败：${error.message}`;
+  } finally {
+    if (serial === importSerial) {
+      loading = false;
+      render();
+    }
   }
 }
 
@@ -1776,7 +1809,10 @@ async function pollJob() {
 
 async function refreshBookVersions() {
   if (!currentBookId || offlineMode) return;
-  const states = await (await libraryFetch(`/v1/books/${currentBookId}/versions`)).json();
+  const bookId = currentBookId;
+  const serial = importSerial;
+  const states = await (await libraryFetch(`/v1/books/${bookId}/versions`)).json();
+  if (serial !== importSerial || currentBookId !== bookId || offlineMode) return;
   bookVersions = {};
   for (const [segmentId, state] of Object.entries(states)) {
     bookVersions[segmentId] = state.versions.find(item => item.id === state.selected);
