@@ -551,6 +551,10 @@ def check_real_offline_audio_playback(browser, origin):
           const audio = document.querySelector("#audio");
           return !audio.paused && audio.currentTime > 0;
         }""")
+        page.wait_for_function("""() => {
+          const status = document.querySelector("#status").textContent;
+          return status.startsWith("正在播放") && !status.includes("继续播放失败");
+        }""", timeout=5000)
         assert "继续播放失败" not in page.locator("#status").inner_text()
         page.wait_for_function("""() =>
           document.querySelector("#status").textContent.includes("朗读完成")""",
