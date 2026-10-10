@@ -48,6 +48,7 @@ const ui = {
   offlineSearch: element("offlineSearch"),
   offlineFilter: element("offlineFilter"),
   offlineSort: element("offlineSort"),
+  offlineClearFilters: element("offlineClearFilters"),
   refreshOfflineBooks: element("refreshOfflineBooks"),
   offlineDownloadIndicator: element("offlineDownloadIndicator"),
   offlineDownloadProgress: element("offlineDownloadProgress"),
@@ -1434,6 +1435,8 @@ function renderOfflineBookRows() {
   // Search, filtering and sorting use the last completed IndexedDB snapshot.
   // Avoid an asynchronous fetch or empty-list flash on every keystroke.
   const books = offlineVisibleBooks();
+  ui.offlineClearFilters.disabled = !ui.offlineSearch.value.trim() &&
+    ui.offlineFilter.value === "all";
   ui.offlineBooks.replaceChildren();
   if (!offlineBooksSnapshot.length || !books.length) {
     const empty = document.createElement("p");
@@ -1503,6 +1506,12 @@ function renderOfflineBookRows() {
           confirm.focus();
         });
         cancel.addEventListener("click", resetConfirmation);
+        confirmation.addEventListener("keydown", event => {
+          if (event.key === "Escape") {
+            event.preventDefault();
+            resetConfirmation();
+          }
+        });
         confirm.addEventListener("click", async () => {
           confirm.disabled = true;
           cancel.disabled = true;
@@ -2091,6 +2100,12 @@ ui.refreshOfflineBooks.addEventListener("click", renderOfflineBooks);
 ui.offlineSearch.addEventListener("input", renderOfflineBookRows);
 ui.offlineFilter.addEventListener("change", renderOfflineBookRows);
 ui.offlineSort.addEventListener("change", renderOfflineBookRows);
+ui.offlineClearFilters.addEventListener("click", () => {
+  ui.offlineSearch.value = "";
+  ui.offlineFilter.value = "all";
+  renderOfflineBookRows();
+  ui.offlineSearch.focus();
+});
 ui.cancelOfflineDownload.addEventListener("click", () => offlineDownload?.controller.abort());
 ui.exportEpub.addEventListener("click", exportEpub);
 ui.exportWav.addEventListener("click", exportWav);
