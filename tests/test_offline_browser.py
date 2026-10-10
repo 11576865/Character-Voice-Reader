@@ -1254,6 +1254,130 @@ def check_cross_tab_deletion_storage_event_fallback(browser, origin):
         context.close()
 
 
+
+def check_pending_offline_open_is_revalidated_after_pagehide(browser, origin):
+    """A frozen pending book read cannot revive a deleted book on pageshow."""
+    context = browser.new_context(viewport={"width": 390, "height": 780})
+    reader, manager = context.new_page(), context.new_page()
+    errors = []
+    reader.on("pageerror", lambda error: errors.append("reader: " + str(error)))
+    manager.on("pageerror", lambda error: errors.append("manager: " + str(error)))
+    try:
+        reader.goto(origin + "/reader-ui", wait_until="domcontentloaded")
+        manager.goto(origin + "/reader-ui", wait_until="domcontentloaded")
+        reader.get_by_text("暂无本机离线书籍", exact=False).wait_for()
+        manager.get_by_text("暂无本机离线书籍", exact=False).wait_for()
+        reader.evaluate("""async () => {
+          const { OfflineLibrary } = await import("/reader-assets/js/offline.js");
+          const { segmentDocument } = await import("/reader-assets/js/segmenter.js");
+          const library = new OfflineLibrary();
+          for (const [letter, title] of [
+            ["1", "休眠期间被删除"], ["2", "休眠期间仍保留"],
+            ["3", "用户已切换来源"]
+          ]) {
+            const id = "b-" + letter.repeat(24);
+            const document = { title, chapters: [{
+              title: "正文", paragraphs: ["仅属于" + title + "的正文。"]
+            }] };
+            await library.putBook({
+              id, title, kind: "epub", document,
+              segments: segmentDocument(document).map((segment, i) => ({
+                ...segment, id: letter + "-clip-" + i
+              })), ready: true
+            });
+          }
+          const old = OfflineLibrary.prototype.getBook;
+          window.waitingIds = [];
+          window.pendingReleases = {};
+          window.bookReadCounts = {};
+          const delay = new Set(["1", "2", "3"].map(c => "b-" + c.repeat(24)));
+          OfflineLibrary.prototype.getBook = async function(id) {
+            window.bookReadCounts[id] = (window.bookReadCounts[id] || 0) + 1;
+            const result = await old.call(this, id);
+            if (!delay.delete(id)) return result;
+            window.waitingIds.push(id);
+            return new Promise(resolve => {
+              window.pendingReleases[id] = () => resolve(result);
+            });
+          };
+        }""")
+        reader.locator("#refreshOfflineBooks").click()
+        reader.wait_for_function("""() =>
+          document.querySelectorAll(".offline-book-row").length === 3""")
+
+        first_id = "b-" + "1" * 24
+        reader.locator(".offline-book-row").filter(has_text="休眠期间被删除") \
+            .get_by_role("button", name="打开阅读").click()
+        reader.wait_for_function("""id =>
+          window.waitingIds.includes(id)""", arg=first_id)
+        reader.evaluate("""() => window.dispatchEvent(
+          new PageTransitionEvent("pagehide", { persisted: true }))""")
+        manager.evaluate("""async () => {
+          const { OfflineLibrary } = await import("/reader-assets/js/offline.js");
+          await new OfflineLibrary().removeBook("b-" + "1".repeat(24));
+        }""")
+        reader.evaluate("""() => window.dispatchEvent(
+          new PageTransitionEvent("pageshow", { persisted: true }))""")
+        reader.wait_for_function("""id =>
+          window.bookReadCounts[id] >= 2""", arg=first_id)
+        reader.wait_for_function("""() => {
+          const status = document.querySelector("#offlineLibraryStatus").textContent;
+          return status.includes("打开失败") ||
+            document.querySelectorAll(".offline-book-row").length === 2;
+        }""")
+        reader.evaluate("""id => window.pendingReleases[id]()""", first_id)
+        reader.wait_for_timeout(100)
+        assert "休眠期间被删除" not in reader.locator("#source").inner_text()
+        assert not reader.locator("#documentBody").get_by_text(
+            "仅属于休眠期间被删除的正文", exact=False
+        ).count(), "A stale pre-pagehide book read must not reopen a deleted document"
+        assert reader.locator("#start").is_disabled()
+        reader.wait_for_function("""() =>
+          document.querySelectorAll(".offline-book-row").length === 2""")
+
+        # A still-live book should be retried after revival and eventually open.
+        second_id = "b-" + "2" * 24
+        reader.locator(".offline-book-row").filter(has_text="休眠期间仍保留") \
+            .get_by_role("button", name="打开阅读").click()
+        reader.wait_for_function("id => window.waitingIds.includes(id)", arg=second_id)
+        reader.evaluate("""() => window.dispatchEvent(
+          new PageTransitionEvent("pagehide", { persisted: true }))""")
+        reader.evaluate("""() => window.dispatchEvent(
+          new PageTransitionEvent("pageshow", { persisted: true }))""")
+        reader.wait_for_function("id => window.bookReadCounts[id] >= 2", arg=second_id)
+        reader.wait_for_function("""() => document.querySelector("#source")
+          .textContent.includes("休眠期间仍保留")""")
+        reader.evaluate("id => window.pendingReleases[id]()", second_id)
+        reader.wait_for_timeout(60)
+        assert "休眠期间仍保留" in reader.locator("#source").inner_text()
+        assert "仅属于休眠期间仍保留的正文" in \
+            reader.locator("#documentBody").inner_text()
+
+        # A deliberate newer source change while suspended takes precedence
+        # over the intended BFCache retry and the original stale completion.
+        third_id = "b-" + "3" * 24
+        reader.locator(".offline-book-row").filter(has_text="用户已切换来源") \
+            .get_by_role("button", name="打开阅读").click()
+        reader.wait_for_function("id => window.waitingIds.includes(id)", arg=third_id)
+        reader.evaluate("""() => window.dispatchEvent(
+          new PageTransitionEvent("pagehide", { persisted: true }))""")
+        reader.locator("#manualPanel").evaluate("(el) => { el.open = true; }")
+        reader.locator("#text").fill("用户主动选择的新文本应该胜出。")
+        reader.locator("#useManual").click()
+        reader.evaluate("""() => window.dispatchEvent(
+          new PageTransitionEvent("pageshow", { persisted: true }))""")
+        reader.evaluate("id => window.pendingReleases[id]()", third_id)
+        reader.wait_for_timeout(100)
+        assert reader.evaluate("id => window.bookReadCounts[id]", third_id) == 1, \
+            "pageshow must not retry a source already superseded by the user"
+        assert "手动输入" in reader.locator("#source").inner_text()
+        assert "用户主动选择的新文本应该胜出" in \
+            reader.locator("#documentBody").inner_text()
+        assert not errors, "BFCache-transition UI errors: " + repr(errors)
+    finally:
+        context.close()
+
+
 def main():
     # Keep the optional Playwright dependency out of the default pytest collection.
     from playwright.sync_api import sync_playwright
@@ -1274,6 +1398,7 @@ def main():
                 check_current_clip_owner_atomic_read_cross_tab(browser, origin)
                 check_cross_tab_deletion_stops_active_audio_and_pending_book_open(browser, origin)
                 check_cross_tab_deletion_storage_event_fallback(browser, origin)
+                check_pending_offline_open_is_revalidated_after_pagehide(browser, origin)
                 check_offline_shelf_ui_without_service(browser, origin)
                 check_late_book_open_cannot_replace_newer_source(browser, origin)
                 check_real_offline_audio_playback(browser, origin)
