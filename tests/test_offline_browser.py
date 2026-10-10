@@ -548,6 +548,18 @@ def check_real_offline_audio_playback(browser, origin):
         assert page.locator("#audio").evaluate(
             "(el) => el.paused && !el.getAttribute('src')"
         ), "Stop must pause and remove the object URL source"
+        assert page.evaluate("""async () => {
+          const { AudioPlayer } = await import("/reader-assets/js/player.js");
+          const testAudio = document.createElement("audio");
+          let errorMessage = "";
+          const player = new AudioPlayer(testAudio, {
+            onError: error => { errorMessage = error.message; }
+          });
+          player.objectUrl = "blob:simulated-decode-error";
+          testAudio.dispatchEvent(new Event("error"));
+          return errorMessage.includes("音频格式")
+            && !errorMessage.includes("WAV 音频");
+        }"""), "Decode diagnostics must not mislabel all formats as WAV"
         assert not errors, "Real audio playback raised JS errors: " + repr(errors)
     finally:
         context.close()
