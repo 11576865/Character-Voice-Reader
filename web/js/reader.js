@@ -2251,7 +2251,15 @@ window.addEventListener("pageshow", () => {
   if (!stopOfflineDeletionObserver) {
     stopOfflineDeletionObserver =
       observeOfflineBookDeletions(onRemoteOfflineBookDeleted);
-    void renderOfflineBooks(); // Catch deletions missed while the page was frozen.
+    void renderOfflineBooks(); // Reconcile any shelf updates while frozen.
+    if (offlineMode && currentBookId) {
+      const bookId = currentBookId;
+      void offlineLibrary.getBook(bookId).then(book => {
+        if (!book && offlineMode && currentBookId === bookId) {
+          onRemoteOfflineBookDeleted(bookId);
+        }
+      }).catch(() => { /* A temporary storage error is not proof of deletion. */ });
+    }
   }
 });
 render();
