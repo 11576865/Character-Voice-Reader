@@ -899,7 +899,9 @@ function render(snapshot = queue.snapshot) {
     loading: `正在生成第 ${number} 个片段……`,
     advancing: `正在衔接第 ${number} 个片段……`,
     playing: `正在播放第 ${number} 个片段${prefetchLabel}。`,
-    paused: `已暂停在第 ${number} 个片段。`,
+    paused: snapshot.error
+      ? `继续播放失败：${snapshot.error.message}。请再次点击“继续”，或检查浏览器的媒体播放权限。`
+      : `已暂停在第 ${number} 个片段。`,
     error: `朗读失败：${snapshot.error?.message || "未知错误"}。可重试或跳过此段。`,
     cancelled: "已停止，当前位置已保留。",
     finished: `朗读完成，共 ${snapshot.total} 个片段。`
