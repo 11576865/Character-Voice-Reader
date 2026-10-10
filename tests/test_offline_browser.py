@@ -680,6 +680,13 @@ def check_offline_shelf_search_filter_sort_and_refresh(browser, origin):
         page.get_by_text("没有符合搜索或筛选条件", exact=False).wait_for()
         assert rows.count() == 0
         assert "0/3" in page.locator("#offlineLibraryStatus").inner_text()
+        assert not page.locator("#offlineClearFilters").is_disabled()
+        page.locator("#offlineClearFilters").click()
+        assert page.locator("#offlineSearch").input_value() == ""
+        assert page.locator("#offlineFilter").input_value() == "all"
+        assert rows.count() == 3
+        assert page.locator("#offlineClearFilters").is_disabled()
+        page.locator("#offlineSearch").fill("Ada")
         page.locator("#offlineFilter").select_option("partial")
         assert rows.count() == 1
         assert rows.first.locator("strong").inner_text() == "Alpha"
@@ -729,6 +736,10 @@ def check_offline_shelf_search_filter_sort_and_refresh(browser, origin):
         page.locator("#offlineSearch").fill("Ada")
         page.locator("#offlineFilter").select_option("partial")
         assert rows.count() == 1
+        rows.first.get_by_role("button", name="删除本机副本").click()
+        rows.first.get_by_role("button", name="确认删除").press("Escape")
+        assert rows.count() == 1, "Escape must cancel deletion without deleting the book"
+        assert rows.first.get_by_role("button", name="删除本机副本").is_visible()
         rows.first.get_by_role("button", name="删除本机副本").click()
         rows.first.get_by_role("button", name="确认删除").click()
         page.get_by_text("没有符合搜索或筛选条件", exact=False).wait_for()
