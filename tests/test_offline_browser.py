@@ -18,6 +18,18 @@ class QuietHandler(SimpleHTTPRequestHandler):
     def __init__(self, *args, **kwargs):
         super().__init__(*args, directory=str(ROOT), **kwargs)
 
+    def do_GET(self):
+        # Serve the real app entry and asset contract without a CVS backend.
+        # Existing storage-only tests continue using /web/js/offline.js.
+        path = self.path.split("?", 1)[0]
+        if path == "/reader-ui":
+            self.path = "/web/index.html"
+        elif path.startswith("/reader-assets/"):
+            self.path = "/web/" + self.path[len("/reader-assets/"):]
+        elif path == "/service-worker.js":
+            self.path = "/web/sw.js"
+        return super().do_GET()
+
     def log_message(self, format, *args):
         pass
 
@@ -223,6 +235,81 @@ def check_delete_reclaims_orphaned_manifest_clips(browser, origin):
         context.close()
 
 
+
+def check_offline_shelf_ui_without_service(browser, origin):
+    context = browser.new_context(viewport={"width": 390, "height": 780})
+    page = context.new_page()
+    errors = []
+    page.on("pageerror", lambda error: errors.append(str(error)))
+    try:
+        page.goto(origin + "/reader-ui", wait_until="domcontentloaded")
+        shelf = page.locator("#offlineLibraryPanel")
+        assert shelf.is_visible(), "offline shelf should not depend on the CVS login panel"
+        page.get_by_text("暂无本机离线书籍", exact=False).wait_for()
+        assert not page.locator("#libraryPanel").evaluate("(el) => el.open")
+        assert page.locator(".playback-more").count() == 1
+        assert not page.locator(".playback-more").evaluate("(el) => el.open")
+
+        # Insert a realistic offline document with generated segment IDs, but
+        # intentionally provide no voice catalog and no CVS HTTP server.
+        page.evaluate("""async () => {
+          const { OfflineLibrary } = await import("/reader-assets/js/offline.js");
+          const { segmentDocument } = await import("/reader-assets/js/segmenter.js");
+          const library = new OfflineLibrary();
+          const documentModel = {
+            title: "离线阅读示例", chapters: [{
+              title: "第一章", paragraphs: ["这是一段无需在线语音服务的朗读内容。"]
+            }]
+          };
+          const segments = segmentDocument(documentModel).map((segment, index) => ({
+            ...segment, id: "offline-part-" + index
+          }));
+          const clips = segments.map(segment => ({ segmentId: segment.id }));
+          await library.putBook({
+            id: "b-" + "c".repeat(24), kind: "epub", title: "离线阅读示例",
+            document: documentModel, segments, author: "测试",
+            manifest: { clips }, ready: true, downloaded: clips.length
+          });
+          for (const segment of segments) {
+            await library.putClip("b-" + "c".repeat(24),
+              segment.id, new Blob(["not-an-audio-file"], { type: "audio/mpeg" }));
+          }
+        }""")
+        page.locator("#refreshOfflineBooks").click()
+        row = page.locator(".offline-book-row")
+        row.get_by_text("离线阅读示例").wait_for()
+        assert page.locator("#voice").evaluate("(el) => !el.value"), "no server voice catalog expected"
+        row.get_by_role("button", name="打开阅读").click()
+        # IndexedDB book opening is asynchronous: wait for a conclusive UI state.
+        page.wait_for_function("""() => !document.querySelector("#start").disabled ||
+          document.querySelector("#offlineLibraryStatus").textContent.includes("打开失败")""")
+        assert not page.locator("#start").is_disabled(), (
+            "offline playback must not require voice catalog; "
+            + "shelf=" + page.locator("#offlineLibraryStatus").inner_text()
+            + " | playback=" + page.locator("#status").inner_text()
+            + " | source=" + page.locator("#source").inner_text()
+            + " | errors=" + repr(errors)
+        )
+        assert "整本书已可离线听读" in page.locator("#status").inner_text()
+
+        # Deletion requires explicit confirmation and allows cancellation.
+        row.get_by_role("button", name="删除本机副本").click()
+        assert row.get_by_role("button", name="确认删除").is_visible()
+        assert row.get_by_role("button", name="保留书籍").is_visible()
+        row.get_by_role("button", name="保留书籍").click()
+        assert row.get_by_role("button", name="删除本机副本").is_visible()
+        assert page.locator(".offline-book-row").count() == 1
+
+        row.get_by_role("button", name="删除本机副本").click()
+        row.get_by_role("button", name="确认删除").click()
+        page.get_by_text("暂无本机离线书籍", exact=False).wait_for()
+        assert not page.locator("#start").is_enabled(), \
+            "deleting an open offline book must close the playback source"
+        assert not errors, "Reader UI raised browser errors: " + repr(errors)
+    finally:
+        context.close()
+
+
 def main():
     # Keep the optional Playwright dependency out of the default pytest collection.
     from playwright.sync_api import sync_playwright
@@ -239,6 +326,7 @@ def main():
                 check_cross_tab_new_download_supersedes_stale_writer(browser, origin)
                 check_cancel_keeps_verified_partial_audio_for_resume(browser, origin)
                 check_delete_reclaims_orphaned_manifest_clips(browser, origin)
+                check_offline_shelf_ui_without_service(browser, origin)
             finally:
                 browser.close()
     finally:

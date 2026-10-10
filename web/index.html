@@ -4,7 +4,7 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <link rel="icon" type="image/svg+xml" href="/reader-assets/favicon.svg?v=1">
-  <link rel="stylesheet" href="/reader-assets/reader.css?v=6">
+  <link rel="stylesheet" href="/reader-assets/reader.css?v=7">
   <title>Character Voice Reader</title>
 </head>
 <body data-theme="auto">
@@ -15,7 +15,11 @@
         <h1>Character Voice Reader</h1>
         <p>导入 TXT / EPUB 或直接粘贴文本，以角色语音连续朗读。阅读位置与本机偏好保存在当前浏览器。</p>
       </div>
-      <a class="quiet-link" href="/epub-prototype">EPUB 组件验证</a>
+      <nav class="top-links" aria-label="页面快捷入口">
+        <a class="quiet-link" href="#readingPane">阅读正文</a>
+        <a class="quiet-link" href="#offlineLibraryPanel">本机离线书库</a>
+        <a class="quiet-link" href="/epub-prototype">EPUB 组件验证</a>
+      </nav>
     </header>
 
     <section class="panel" aria-labelledby="sourceTitle">
@@ -113,16 +117,23 @@
         <div id="position">尚未开始阅读</div>
         <progress id="readingProgress" max="1" value="0" aria-label="全书阅读进度"></progress>
       </div>
-      <div class="controls playback-controls">
-        <button id="previousChapter" type="button" disabled>上一章</button>
-        <button id="previousSegment" type="button" disabled>上一段</button>
-        <button id="start" class="primary" type="button" disabled>开始</button>
-        <button id="pause" type="button" disabled>暂停</button>
-        <button id="stop" type="button" disabled>停止</button>
-        <button id="nextSegment" type="button" disabled>下一段</button>
-        <button id="nextChapter" type="button" disabled>下一章</button>
-        <button id="regenerateParagraph" type="button" disabled>重生成当前段</button>
-        <button id="previewSelection" type="button" disabled>试听所选文字</button>
+      <div class="playback-actions">
+        <div class="controls playback-controls">
+          <button id="previousSegment" type="button" disabled>上一段</button>
+          <button id="start" class="primary" type="button" disabled>开始</button>
+          <button id="pause" type="button" disabled>暂停</button>
+          <button id="stop" type="button" disabled>停止</button>
+          <button id="nextSegment" type="button" disabled>下一段</button>
+        </div>
+        <details class="playback-more">
+          <summary>章节导航与其他播放操作</summary>
+          <div class="controls playback-extra-controls">
+            <button id="previousChapter" type="button" disabled>上一章</button>
+            <button id="nextChapter" type="button" disabled>下一章</button>
+            <button id="regenerateParagraph" type="button" disabled>重生成当前段</button>
+            <button id="previewSelection" type="button" disabled>试听所选文字</button>
+          </div>
+        </details>
       </div>
     </section>
 
@@ -175,6 +186,23 @@
         <div id="documentBody">请选择 TXT / EPUB，或使用粘贴文本。</div>
       </main>
     </div>
+
+    <section id="offlineLibraryPanel" class="panel offline-library-panel" aria-labelledby="offlineLibraryTitle">
+      <div class="section-head">
+        <div class="section-title"><h2 id="offlineLibraryTitle">本设备离线书库</h2></div>
+        <button id="refreshOfflineBooks" type="button">刷新本机书籍</button>
+      </div>
+      <p class="offline-library-note">这里的书籍保存在当前浏览器，可断开电脑服务后打开。删除只影响本设备副本。</p>
+      <div id="offlineLibraryStatus" class="offline-library-status" role="status" aria-live="polite">正在读取本机书库……</div>
+      <div id="offlineDownloadIndicator" class="offline-download-indicator" hidden>
+        <div class="offline-download-toolbar">
+          <strong id="offlineDownloadLabel">正在准备离线下载……</strong>
+          <button id="cancelOfflineDownload" type="button" disabled>取消下载</button>
+        </div>
+        <progress id="offlineDownloadProgress" max="1" value="0" aria-label="离线下载进度"></progress>
+      </div>
+      <div id="offlineBooks" class="offline-book-list" aria-label="本设备离线书籍"></div>
+    </section>
 
     <section class="tools-grid" aria-label="阅读与生成工具">
       <details class="panel tool-panel">
@@ -323,7 +351,6 @@
           </div>
           <div class="controls library-actions">
             <button id="downloadBook" type="button">下载整本书</button>
-            <button id="cancelOfflineDownload" type="button" disabled>取消离线下载</button>
             <button id="exportEpub" type="button">导出同步 EPUB</button>
             <button id="exportWav" type="button">导出整篇 WAV</button>
             <button id="suggestSpeakers" type="button">查找明确的角色标记</button>
@@ -331,8 +358,6 @@
           <div id="jobStatus" role="status"></div>
           <div id="speakerSuggestions"></div>
           <nav id="libraryBooks" aria-label="本机书库"></nav>
-          <h3 class="subheading">本设备离线书籍</h3>
-          <nav id="offlineBooks" aria-label="离线书库"></nav>
         </div>
       </details>
     </section>
@@ -340,6 +365,6 @@
     <audio id="audio" hidden></audio>
   </div>
 
-  <script type="module" src="/reader-assets/js/reader.js?v=6"></script>
+  <script type="module" src="/reader-assets/js/reader.js?v=7"></script>
 </body>
 </html>
