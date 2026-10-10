@@ -4,7 +4,7 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <link rel="icon" type="image/svg+xml" href="/reader-assets/favicon.svg?v=1">
-  <link rel="stylesheet" href="/reader-assets/reader.css?v=8">
+  <link rel="stylesheet" href="/reader-assets/reader.css?v=9">
   <title>Character Voice Reader</title>
 </head>
 <body data-theme="auto">
@@ -193,6 +193,27 @@
         <button id="refreshOfflineBooks" type="button">刷新本机书籍</button>
       </div>
       <p class="offline-library-note">这里的书籍保存在当前浏览器，可断开电脑服务后打开。删除只影响本设备副本。</p>
+      <div class="offline-shelf-filters" role="search" aria-label="筛选本机离线书籍">
+        <div class="field offline-search-field">
+          <label for="offlineSearch">搜索书名或作者</label>
+          <input id="offlineSearch" type="search" autocomplete="off" placeholder="输入书名或作者" />
+        </div>
+        <div class="field">
+          <label for="offlineFilter">下载状态</label>
+          <select id="offlineFilter">
+            <option value="all">全部书籍</option>
+            <option value="ready">已完成下载</option>
+            <option value="partial">未完成下载</option>
+          </select>
+        </div>
+        <div class="field">
+          <label for="offlineSort">排序</label>
+          <select id="offlineSort">
+            <option value="title">书名 A–Z</option>
+            <option value="progress">下载完成度优先</option>
+          </select>
+        </div>
+      </div>
       <div id="offlineLibraryStatus" class="offline-library-status" role="status" aria-live="polite">正在读取本机书库……</div>
       <div id="offlineDownloadIndicator" class="offline-download-indicator" hidden>
         <div class="offline-download-toolbar">
@@ -365,6 +386,6 @@
     <audio id="audio" hidden></audio>
   </div>
 
-  <script type="module" src="/reader-assets/js/reader.js?v=8"></script>
+  <script type="module" src="/reader-assets/js/reader.js?v=9"></script>
 </body>
 </html>
