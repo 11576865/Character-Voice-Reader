@@ -898,3 +898,139 @@ audio {
   .service-strip { align-items: stretch; flex-direction: column; }
   #retryService { width: 100%; }
 }
+
+/* Reader v7: prioritize playback and make the offline shelf usable without CVS. */
+.top-links {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 8px;
+}
+
+.playback-actions { min-width: 0; }
+.playback-more { margin-top: 8px; }
+.playback-more > summary {
+  display: inline-block;
+  padding: 3px 0;
+  color: var(--muted);
+  font-size: .78rem;
+  font-weight: 650;
+}
+.playback-more > summary:focus-visible,
+.offline-book-row button:focus-visible,
+.top-links a:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 3px;
+}
+.playback-extra-controls { margin-top: 8px; justify-content: flex-end; }
+
+.offline-library-panel { scroll-margin-top: 16px; }
+.offline-library-panel > .section-head { align-items: center; }
+.offline-library-note {
+  margin: 0 0 10px;
+  color: var(--muted);
+  font-size: .81rem;
+}
+.offline-library-status {
+  min-height: 1.4em;
+  margin-bottom: 10px;
+  color: var(--muted);
+  font-size: .79rem;
+}
+.offline-book-list { display: grid; gap: 10px; }
+.offline-empty {
+  padding: 18px;
+  margin: 0;
+  border: 1px dashed var(--border-strong);
+  border-radius: 10px;
+  color: var(--muted);
+  background: var(--panel-soft);
+}
+.offline-book-row {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 16px;
+  padding: 13px 14px;
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  background: var(--panel-soft);
+}
+.offline-book-info { display: grid; gap: 5px; min-width: 0; flex: 1 1 220px; }
+.offline-book-info strong { font-size: .9rem; overflow-wrap: anywhere; }
+.offline-book-info span { color: var(--muted); font-size: .75rem; }
+.offline-book-info progress { width: min(100%, 280px); height: 7px; accent-color: var(--accent); }
+.offline-book-actions { display: flex; flex: 0 1 auto; flex-wrap: wrap; gap: 8px; align-items: center; }
+.offline-book-actions button { min-height: 40px; }
+button.danger-subtle { color: var(--danger); }
+button.danger-subtle:hover:not(:disabled) {
+  background: color-mix(in srgb, var(--danger) 9%, var(--panel));
+  border-color: var(--danger);
+}
+.offline-confirm {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 7px;
+}
+.offline-confirm > span {
+  flex-basis: 100%;
+  color: var(--danger);
+  font-size: .78rem;
+}
+.offline-confirm[hidden],
+#offlineDownloadIndicator[hidden] { display: none !important; }
+.offline-download-indicator {
+  margin-bottom: 12px;
+  padding: 12px;
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  background: var(--accent-soft);
+}
+.offline-download-toolbar {
+  display: flex;
+  justify-content: space-between;
+  gap: 12px;
+  align-items: center;
+}
+.offline-download-toolbar strong { font-size: .82rem; }
+#offlineDownloadProgress { width: 100%; height: 8px; accent-color: var(--accent); }
+
+@media (max-width: 760px) {
+  .top-links { justify-content: flex-start; }
+  .playback-bar {
+    position: sticky;
+    top: 0;
+    z-index: 10;
+    gap: 8px;
+    box-shadow: 0 10px 24px rgba(20, 32, 46, .14);
+  }
+  .playback-controls {
+    display: grid;
+    grid-template-columns: repeat(5, minmax(0, 1fr));
+    gap: 5px;
+  }
+  .playback-controls > button {
+    min-width: 0;
+    padding: 7px 2px;
+    min-height: 44px;
+    flex: none;
+    font-size: .78rem;
+  }
+  .playback-controls #start { min-width: 0; }
+  .playback-extra-controls { justify-content: flex-start; }
+  .offline-book-row { align-items: stretch; flex-direction: column; }
+  .offline-book-actions { width: 100%; }
+  .offline-book-actions > button { flex: 1 1 0; }
+  .offline-library-panel .section-head { display: flex; flex-wrap: wrap; align-items: center; }
+  #readingPane { scroll-margin-top: 140px; }
+}
+@media (max-width: 380px) {
+  .playback-controls { grid-template-columns: repeat(3, minmax(0, 1fr)); }
+  .playback-controls > button { font-size: .82rem; }
+}
+@media (prefers-reduced-motion: reduce) {
+  html, #readingPane { scroll-behavior: auto; }
+  .segment { transition: none; }
+}
