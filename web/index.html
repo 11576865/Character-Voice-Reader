@@ -4,7 +4,7 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <link rel="icon" type="image/svg+xml" href="/reader-assets/favicon.svg?v=1">
-  <link rel="stylesheet" href="/reader-assets/reader.css?v=9">
+  <link rel="stylesheet" href="/reader-assets/reader.css?v=10">
   <title>Character Voice Reader</title>
 </head>
 <body data-theme="auto">
@@ -226,6 +226,20 @@
         <progress id="offlineDownloadProgress" max="1" value="0" aria-label="离线下载进度"></progress>
       </div>
       <div id="offlineBooks" class="offline-book-list" aria-label="本设备离线书籍"></div>
+      <details id="offlineStorageDetails" class="offline-storage-details">
+        <summary>存储空间与下载问题</summary>
+        <div class="offline-storage-body">
+          <div class="offline-storage-toolbar">
+            <span id="offlineStorageUsage" role="status" aria-live="polite">尚未检查浏览器存储额度。</span>
+            <button id="refreshOfflineStorage" type="button">检查存储空间</button>
+          </div>
+          <p>显示的是浏览器提供的估算值，不代表手机或电脑的全部剩余空间。已下载的本机副本可在上方逐本删除，不影响电脑书库。</p>
+        </div>
+      </details>
+      <p id="offlineStorageRecovery" class="offline-storage-recovery" role="alert" hidden>
+        浏览器存储空间不足。已成功保存的音频仍可保留和续传。
+        <a href="#offlineLibraryPanel">检查并清理不再需要的本机书籍</a>，然后重新点击“下载整本书”。
+      </p>
     </section>
 
     <section class="tools-grid" aria-label="阅读与生成工具">
@@ -389,6 +403,6 @@
     <audio id="audio" hidden></audio>
   </div>
 
-  <script type="module" src="/reader-assets/js/reader.js?v=9"></script>
+  <script type="module" src="/reader-assets/js/reader.js?v=10"></script>
 </body>
 </html>
