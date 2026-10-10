@@ -310,6 +310,137 @@ def check_offline_shelf_ui_without_service(browser, origin):
         context.close()
 
 
+
+def check_late_book_open_cannot_replace_newer_source(browser, origin):
+    context = browser.new_context(viewport={"width": 390, "height": 780})
+    page = context.new_page()
+    errors = []
+    page.on("pageerror", lambda error: errors.append(str(error)))
+    try:
+        page.goto(origin + "/reader-ui", wait_until="domcontentloaded")
+        page.get_by_text("暂无本机离线书籍", exact=False).wait_for()
+
+        # First remote book is pending; manual text supersedes the request.
+        page.evaluate("""() => {
+          const nativeFetch = window.fetch.bind(window);
+          const id = "b-" + "d".repeat(24);
+          window.remoteStarted = false;
+          window.fetch = (input, options) => {
+            const url = new URL(String(input), location.href);
+            if (url.pathname === "/v1/books") return Promise.resolve(Response.json({
+              books: [{ id, title: "远端慢书", kind: "epub" }]
+            }));
+            if (url.pathname === "/v1/books/" + id) {
+              window.remoteStarted = true;
+              return new Promise(resolve => {
+                window.releaseRemote = () => resolve(Response.json({
+                  id, title: "远端慢书", kind: "epub", author: "",
+                  document: { title: "远端慢书", chapters: [
+                    { title: "第一章", paragraphs: ["不应出现的远端内容。"] }
+                  ] },
+                  segments: [{ id: "remote-segment" }]
+                }));
+              });
+            }
+            return nativeFetch(input, options);
+          };
+        }""")
+        page.locator("#libraryPanel").evaluate("(element) => { element.open = true; }")
+        page.locator("#loadLibrary").click()
+        page.get_by_role("button", name="远端慢书 · EPUB").wait_for()
+        page.get_by_role("button", name="远端慢书 · EPUB").click()
+        page.wait_for_function("window.remoteStarted")
+        page.locator("#manualPanel").evaluate("(element) => { element.open = true; }")
+        page.locator("#text").fill("手动文档最终应被保留。")
+        page.locator("#useManual").click()
+        page.evaluate("""async () => {
+          window.releaseRemote();
+          await new Promise(resolve => setTimeout(resolve, 0));
+        }""")
+        assert "手动输入" in page.locator("#source").inner_text()
+        assert "手动文档最终应被保留" in page.locator("#documentBody").inner_text()
+        assert "正在读取文件" not in page.locator("#status").inner_text()
+
+        # A slow IndexedDB book A must not replace faster book B.
+        page.evaluate("""async () => {
+          const { OfflineLibrary } = await import("/reader-assets/js/offline.js");
+          const original = OfflineLibrary.prototype.getBook;
+          const slow = "b-" + "e".repeat(24);
+          const fast = "b-" + "f".repeat(24);
+          window.localSlowStarted = false;
+          for (const [id, title] of [[slow, "本机慢书A"], [fast, "本机快书B"]]) {
+            const document = { title, chapters: [
+              { title: "正文", paragraphs: [title + "的正文。"] }
+            ] };
+            await new OfflineLibrary().putBook({
+              id, title, kind: "epub", document,
+              segments: [{ id: id + "-clip", index: 0 }],
+              ready: false, downloaded: 0, manifest: {
+                clips: [{ segmentId: id + "-clip" }]
+              }
+            });
+          }
+          OfflineLibrary.prototype.getBook = function(id) {
+            if (id !== slow) return original.call(this, id);
+            window.localSlowStarted = true;
+            return new Promise(resolve => {
+              window.releaseLocalSlow = () => original.call(this, id).then(resolve);
+            });
+          };
+        }""")
+        page.locator("#refreshOfflineBooks").click()
+        page.get_by_text("本机快书B", exact=True).wait_for()
+        page.locator(".offline-book-row").filter(has_text="本机慢书A") \
+            .get_by_role("button", name="打开阅读").click()
+        page.wait_for_function("window.localSlowStarted")
+        page.locator(".offline-book-row").filter(has_text="本机快书B") \
+            .get_by_role("button", name="打开阅读").click()
+        page.wait_for_function("""() => document.querySelector("#source")
+          .textContent.includes("本机快书B")""")
+        page.evaluate("""async () => {
+          window.releaseLocalSlow();
+          await new Promise(resolve => setTimeout(resolve, 0));
+        }""")
+        assert "本机快书B" in page.locator("#source").inner_text()
+        assert "本机快书B" in page.locator("#documentBody").inner_text()
+        assert not page.locator("#start").is_disabled()
+
+        # An in-progress file read is superseded by manual text. The old
+        # finally handler cannot leave a stale loading flag behind.
+        page.evaluate("""() => {
+          const native = File.prototype.arrayBuffer;
+          window.slowFileStarted = false;
+          File.prototype.arrayBuffer = function(...args) {
+            if (this.name !== "slow-import.txt") return native.apply(this, args);
+            window.slowFileStarted = true;
+            return new Promise(resolve => {
+              window.releaseSlowFile = () => resolve(
+                new TextEncoder().encode("旧文件内容").buffer
+              );
+            });
+          };
+        }""")
+        page.locator("#txtFile").set_input_files({
+            "name": "slow-import.txt", "mimeType": "text/plain",
+            "buffer": "旧文件内容".encode("utf-8")
+        })
+        page.wait_for_function("window.slowFileStarted")
+        page.locator("#manualPanel").evaluate("(element) => { element.open = true; }")
+        page.locator("#text").fill("最后选择的手动文本。")
+        page.locator("#useManual").click()
+        page.evaluate("""async () => {
+          window.releaseSlowFile();
+          await new Promise(resolve => setTimeout(resolve, 0));
+        }""")
+        assert "手动输入" in page.locator("#source").inner_text()
+        assert "最后选择的手动文本" in page.locator("#documentBody").inner_text()
+        assert not page.locator("#useManual").is_disabled()
+        assert "正在读取文件" not in page.locator("#status").inner_text()
+        assert not errors, "Unexpected Reader browser exceptions: " + repr(errors)
+    finally:
+        context.close()
+
+
 def main():
     # Keep the optional Playwright dependency out of the default pytest collection.
     from playwright.sync_api import sync_playwright
@@ -327,6 +458,7 @@ def main():
                 check_cancel_keeps_verified_partial_audio_for_resume(browser, origin)
                 check_delete_reclaims_orphaned_manifest_clips(browser, origin)
                 check_offline_shelf_ui_without_service(browser, origin)
+                check_late_book_open_cannot_replace_newer_source(browser, origin)
             finally:
                 browser.close()
     finally:
