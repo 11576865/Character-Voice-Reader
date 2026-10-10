@@ -6,12 +6,9 @@ Run: python tests/test_offline_browser.py
 
 from __future__ import annotations
 
-import functools
 import threading
 from http.server import SimpleHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
-
-from playwright.sync_api import sync_playwright
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -47,7 +44,7 @@ def prepare(page, origin):
     }""")
 
 
-def test_late_result_after_cross_tab_delete(browser, origin):
+def check_late_result_after_cross_tab_delete(browser, origin):
     context = browser.new_context()
     first, second = context.new_page(), context.new_page()
     try:
@@ -87,7 +84,7 @@ def test_late_result_after_cross_tab_delete(browser, origin):
         context.close()
 
 
-def test_cross_tab_new_download_supersedes_stale_writer(browser, origin):
+def check_cross_tab_new_download_supersedes_stale_writer(browser, origin):
     context = browser.new_context()
     old, newer = context.new_page(), context.new_page()
     try:
@@ -130,7 +127,7 @@ def test_cross_tab_new_download_supersedes_stale_writer(browser, origin):
         context.close()
 
 
-def test_cancel_keeps_verified_partial_audio_for_resume(browser, origin):
+def check_cancel_keeps_verified_partial_audio_for_resume(browser, origin):
     context = browser.new_context()
     page = context.new_page()
     try:
@@ -181,6 +178,9 @@ def test_cancel_keeps_verified_partial_audio_for_resume(browser, origin):
 
 
 def main():
+    # Keep the optional Playwright dependency out of the default pytest collection.
+    from playwright.sync_api import sync_playwright
+
     server = ThreadingHTTPServer(("127.0.0.1", 0), QuietHandler)
     worker = threading.Thread(target=server.serve_forever, daemon=True)
     worker.start()
@@ -189,9 +189,9 @@ def main():
         with sync_playwright() as playwright:
             browser = playwright.chromium.launch(headless=True)
             try:
-                test_late_result_after_cross_tab_delete(browser, origin)
-                test_cross_tab_new_download_supersedes_stale_writer(browser, origin)
-                test_cancel_keeps_verified_partial_audio_for_resume(browser, origin)
+                check_late_result_after_cross_tab_delete(browser, origin)
+                check_cross_tab_new_download_supersedes_stale_writer(browser, origin)
+                check_cancel_keeps_verified_partial_audio_for_resume(browser, origin)
             finally:
                 browser.close()
     finally:
