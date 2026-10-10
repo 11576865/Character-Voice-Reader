@@ -5,7 +5,7 @@ export class AudioPlayer {
     this.pendingSeek = null;
     audioElement.addEventListener("ended", () => onEnded?.());
     audioElement.addEventListener("error", () => {
-      if (this.objectUrl) onError?.(new Error("浏览器无法播放 WAV 音频。"));
+      if (this.objectUrl) onError?.(new Error("浏览器无法解码当前音频；请检查音频文件是否完整，以及浏览器是否支持该音频格式。"));
     });
     audioElement.addEventListener("timeupdate", () => onTimeUpdate?.(audioElement.currentTime));
   }

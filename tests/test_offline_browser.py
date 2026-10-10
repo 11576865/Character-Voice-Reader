@@ -441,6 +441,168 @@ def check_late_book_open_cannot_replace_newer_source(browser, origin):
         context.close()
 
 
+
+def check_real_offline_audio_playback(browser, origin):
+    """Exercise actual HTMLAudioElement decoding, not just the enabled Start button."""
+    context = browser.new_context(viewport={"width": 390, "height": 780})
+    page = context.new_page()
+    errors = []
+    page.on("pageerror", lambda error: errors.append(str(error)))
+    try:
+        page.goto(origin + "/reader-ui", wait_until="domcontentloaded")
+        page.get_by_text("暂无本机离线书籍", exact=False).wait_for()
+        page.evaluate("""async () => {
+          const { OfflineLibrary } = await import("/reader-assets/js/offline.js");
+          const { segmentDocument } = await import("/reader-assets/js/segmenter.js");
+          const library = new OfflineLibrary();
+          const bookId = "b-" + "9".repeat(24);
+          const model = { title: "浏览器播放实测", chapters: [{
+            title: "第一章", paragraphs: ["第一段独立语音。", "第二段独立语音。"]
+          }] };
+          const segments = segmentDocument(model).map((segment, index) => ({
+            ...segment, id: "real-wav-" + index
+          }));
+          function pcmWave(seconds, frequency) {
+            const rate = 16000, frames = Math.floor(seconds * rate);
+            const buffer = new ArrayBuffer(44 + frames * 2);
+            const view = new DataView(buffer);
+            const fourCC = (offset, text) => {
+              for (let i = 0; i < text.length; i++) {
+                view.setUint8(offset + i, text.charCodeAt(i));
+              }
+            };
+            fourCC(0, "RIFF");
+            view.setUint32(4, 36 + frames * 2, true);
+            fourCC(8, "WAVE");
+            fourCC(12, "fmt ");
+            view.setUint32(16, 16, true);
+            view.setUint16(20, 1, true); // PCM
+            view.setUint16(22, 1, true); // mono
+            view.setUint32(24, rate, true);
+            view.setUint32(28, rate * 2, true);
+            view.setUint16(32, 2, true);
+            view.setUint16(34, 16, true);
+            fourCC(36, "data");
+            view.setUint32(40, frames * 2, true);
+            for (let i = 0; i < frames; i++) {
+              view.setInt16(44 + i * 2,
+                Math.floor(3500 * Math.sin(i * 2 * Math.PI * frequency / rate)), true);
+            }
+            return new Blob([buffer], { type: "audio/wav" });
+          }
+          await library.putBook({
+            id: bookId, title: model.title, kind: "epub",
+            document: model, segments, ready: true, downloaded: segments.length,
+            manifest: { clips: segments.map(segment => ({ segmentId: segment.id })) }
+          });
+          for (const [index, segment] of segments.entries()) {
+            const wrote = await library.putClip(bookId, segment.id,
+              pcmWave(1.2, 330 + 110 * index));
+            if (!wrote) throw new Error("Could not write audio fixture");
+          }
+        }""")
+        page.locator("#refreshOfflineBooks").click()
+        page.get_by_text("浏览器播放实测", exact=True).wait_for()
+        page.locator(".offline-book-row").get_by_role("button", name="打开阅读").click()
+        page.wait_for_function("""() => !document.querySelector("#start").disabled
+          && document.querySelector("#source").textContent.includes("浏览器播放实测")""")
+        assert page.locator("#voice").evaluate("(node) => !node.value"), \
+            "real cached audio must work without an online voice catalog"
+        page.locator("#start").click()
+        page.wait_for_function("""() => {
+          const audio = document.querySelector("#audio");
+          return audio.currentTime > 0.12 && !audio.paused && audio.duration >= 1.0;
+        }""", timeout=7000)
+        assert page.locator("#status").inner_text().startswith("正在播放"), \
+            "Reader should report actual playback"
+        page.locator("#pause").click()
+        page.wait_for_function("document.querySelector('#audio').paused")
+        paused_time = page.locator("#audio").evaluate("(audio) => audio.currentTime")
+        page.wait_for_timeout(150)
+        held_time = page.locator("#audio").evaluate("(audio) => audio.currentTime")
+        assert abs(held_time - paused_time) < 0.12, \
+            "Pause must preserve real media position"
+        page.locator("#start").click()  # Resume
+        page.wait_for_function("""() => {
+          const audio = document.querySelector("#audio");
+          return !audio.paused && audio.currentTime > 0;
+        }""")
+        page.wait_for_function("""() =>
+          document.querySelector("#status").textContent.includes("朗读完成")""",
+          timeout=9000)
+        assert page.locator("#readingProgress").evaluate(
+            "(el) => Number(el.value) === 2 and Number(el.max) === 2"
+        ) if False else True
+        assert page.locator("#readingProgress").evaluate(
+            "(el) => Number(el.value) === 2 && Number(el.max) === 2"
+        ), "Both real audio clips should advance the reading progress"
+        assert page.locator("#audio").evaluate(
+            "(el) => !el.getAttribute('src')"
+        ), "Completion must release the media element source"
+
+        # A new playback followed by Stop must revoke the active object URL.
+        page.locator("#start").click()
+        page.wait_for_function("""() => document.querySelector("#audio").currentTime > 0.08
+          && !document.querySelector("#audio").paused""", timeout=7000)
+        page.locator("#stop").click()
+        assert page.locator("#audio").evaluate(
+            "(el) => el.paused && !el.getAttribute('src')"
+        ), "Stop must pause and remove the object URL source"
+        assert page.evaluate("""async () => {
+          const { AudioPlayer } = await import("/reader-assets/js/player.js");
+          const testAudio = document.createElement("audio");
+          let errorMessage = "";
+          const player = new AudioPlayer(testAudio, {
+            onError: error => { errorMessage = error.message; }
+          });
+          player.objectUrl = "blob:simulated-decode-error";
+          testAudio.dispatchEvent(new Event("error"));
+          return errorMessage.includes("音频格式")
+            && !errorMessage.includes("WAV 音频");
+        }"""), "Decode diagnostics must not mislabel all formats as WAV"
+        assert not errors, "Real audio playback raised JS errors: " + repr(errors)
+    finally:
+        context.close()
+
+
+
+def check_mobile_touch_reader_controls(browser, origin):
+    """Small touch viewport preserves readable layout and secondary-action disclosure."""
+    context = browser.new_context(
+        viewport={"width": 360, "height": 780},
+        device_scale_factor=2,
+        is_mobile=True,
+        has_touch=True
+    )
+    page = context.new_page()
+    errors = []
+    page.on("pageerror", lambda error: errors.append(str(error)))
+    try:
+        page.goto(origin + "/reader-ui", wait_until="domcontentloaded")
+        page.locator("#manualPanel > summary").tap()
+        page.locator("#text").fill("这是移动端触屏阅读测试的正文。")
+        page.locator("#useManual").tap()
+        page.wait_for_function("""() => document.querySelector("#source")
+          .textContent.includes("手动输入")""")
+        assert "移动端触屏阅读测试" in page.locator("#documentBody").inner_text()
+        metrics = page.evaluate("""() => ({
+          viewport: document.documentElement.clientWidth,
+          scroll: document.documentElement.scrollWidth,
+          bar: document.querySelector(".playback-bar").getBoundingClientRect().width
+        })""")
+        assert metrics["scroll"] <= metrics["viewport"] + 1, \
+            "Reader must not create horizontal page scroll on mobile: " + repr(metrics)
+        assert page.locator(".playback-more > summary").is_visible()
+        page.locator(".playback-more > summary").tap()
+        assert page.locator("#previousChapter").is_visible()
+        assert page.locator("#previewSelection").is_visible()
+        page.locator(".playback-more > summary").tap()
+        assert not page.locator(".playback-more").evaluate("(node) => node.open")
+        assert not errors, "Touch UI raised JS errors: " + repr(errors)
+    finally:
+        context.close()
+
+
 def main():
     # Keep the optional Playwright dependency out of the default pytest collection.
     from playwright.sync_api import sync_playwright
@@ -459,6 +621,8 @@ def main():
                 check_delete_reclaims_orphaned_manifest_clips(browser, origin)
                 check_offline_shelf_ui_without_service(browser, origin)
                 check_late_book_open_cannot_replace_newer_source(browser, origin)
+                check_real_offline_audio_playback(browser, origin)
+                check_mobile_touch_reader_controls(browser, origin)
             finally:
                 browser.close()
     finally:
