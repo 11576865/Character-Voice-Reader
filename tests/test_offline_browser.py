@@ -177,6 +177,52 @@ def check_cancel_keeps_verified_partial_audio_for_resume(browser, origin):
         context.close()
 
 
+def check_delete_reclaims_orphaned_manifest_clips(browser, origin):
+    context = browser.new_context()
+    page = context.new_page()
+    try:
+        prepare(page, origin)
+        assert page.evaluate("""async () => {
+          const book = "b-" + "a".repeat(24);
+          const other = "b-" + "a".repeat(23) + "b";
+          const library = newLibrary();
+          await library.putBook({ id: book, title: "Old",
+            manifest: { clips: [{ segmentId: "old" }] } });
+          await library.putClip(book, "old", audioBlob("stale"));
+          await library.putBook({ id: book, title: "New",
+            manifest: { clips: [{ segmentId: "current" }] } });
+          await library.putClip(book, "current", audioBlob("latest"));
+          await library.putBook({ id: other, title: "Other",
+            manifest: { clips: [{ segmentId: "keep" }] } });
+          await library.putClip(other, "keep", audioBlob("untouched"));
+
+          async function rawClipKeys() {
+            return new Promise((resolve, reject) => {
+              const open = indexedDB.open("character-voice-reader-offline", 1);
+              open.onerror = () => reject(open.error);
+              open.onsuccess = () => {
+                const db = open.result;
+                const tx = db.transaction("clips", "readonly");
+                const request = tx.objectStore("clips").getAllKeys();
+                tx.oncomplete = () => { db.close(); resolve(request.result); };
+                tx.onerror = () => { db.close(); reject(tx.error); };
+              };
+            });
+          }
+          const before = await rawClipKeys();
+          await library.removeBook(book);
+          const after = await rawClipKeys();
+          return before.includes(book + ":old")
+            && before.includes(book + ":current")
+            && !after.some(key => key.startsWith(book + ":"))
+            && after.includes(other + ":keep")
+            && (await library.getBook(book)) === undefined
+            && (await library.getClip(other, "keep"))?.size === 9;
+        }""")
+    finally:
+        context.close()
+
+
 def main():
     # Keep the optional Playwright dependency out of the default pytest collection.
     from playwright.sync_api import sync_playwright
@@ -192,6 +238,7 @@ def main():
                 check_late_result_after_cross_tab_delete(browser, origin)
                 check_cross_tab_new_download_supersedes_stale_writer(browser, origin)
                 check_cancel_keeps_verified_partial_audio_for_resume(browser, origin)
+                check_delete_reclaims_orphaned_manifest_clips(browser, origin)
             finally:
                 browser.close()
     finally:

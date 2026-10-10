@@ -219,15 +219,24 @@ export class OfflineLibrary {
   }
 
   async removeBook(id) {
-    const book = await this.getBook(id);
     const db = await openDatabase();
     await new Promise((resolve, reject) => {
       const tx = db.transaction([BOOKS, CLIPS], "readwrite");
-      // Atomically fence pending downloads and remove their already stored clips.
+      const clips = tx.objectStore(CLIPS);
+      // The current manifest may have dropped segment IDs from an older
+      // download. Purge every persisted clip for this book, not just the
+      // segment IDs in its most recent manifest. One transaction fences
+      // concurrent downloads and prevents partially completed deletions.
       tx.objectStore(BOOKS).put({ id, __cvrDeleted: true }, id);
-      for (const clip of book?.manifest?.clips || []) {
-        tx.objectStore(CLIPS).delete(clipKey(id, clip.segmentId));
-      }
+      const prefix = `${id}:`;
+      const keys = clips.getAllKeys();
+      keys.onsuccess = () => {
+        for (const key of keys.result) {
+          if (typeof key === "string" && key.startsWith(prefix)) {
+            clips.delete(key);
+          }
+        }
+      };
       tx.oncomplete = () => { db.close(); resolve(); };
       tx.onerror = () => { db.close(); reject(tx.error); };
       tx.onabort = () => { db.close(); reject(tx.error); };
