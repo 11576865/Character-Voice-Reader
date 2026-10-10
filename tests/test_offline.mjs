@@ -9,7 +9,7 @@ function memoryIndexedDB() {
   class MemoryTransaction {
     constructor(db, storeName) {
       this.db = db;
-      this.storeName = storeName;
+      this.storeNames = Array.isArray(storeName) ? storeName : [storeName];
       this.pending = 0;
       this.completed = false;
       this.error = null;
@@ -42,7 +42,7 @@ function memoryIndexedDB() {
       return request;
     }
     objectStore(name) {
-      assert.equal(name, this.storeName);
+      assert.ok(this.storeNames.includes(name));
       const store = this.db.stores.get(name);
       assert.ok(store, "missing IndexedDB object store " + name);
       return {
@@ -82,6 +82,7 @@ function memoryIndexedDB() {
       };
       queueMicrotask(() => {
         let db = databases.get(name);
+        const newlyCreated = !db;
         const needsUpgrade = !db || version > db.version;
         if (!db) {
           db = new MemoryDB(name, version);
@@ -92,6 +93,8 @@ function memoryIndexedDB() {
         request.transaction = { abort() { aborted = true; } };
         if (needsUpgrade) request.onupgradeneeded?.();
         if (aborted) {
+          // Aborted versionchange must roll back a newly created database.
+          if (newlyCreated) databases.delete(name);
           request.error = { name: "AbortError" };
           request.onerror?.();
         } else {
@@ -174,6 +177,115 @@ async function testDeleteBeforeInitialListing() {
   assert.equal(await library.getClip(book.id, "segment-1"), undefined);
 }
 
+
+function deferred() {
+  let resolve;
+  let reject;
+  const promise = new Promise((res, rej) => { resolve = res; reject = rej; });
+  return { promise, resolve, reject };
+}
+
+async function clipFixture(contents = ["first", "second"]) {
+  const chunks = contents.map(text => new Blob([text]));
+  const clips = [];
+  for (let index = 0; index < chunks.length; index += 1) {
+    const hash = await crypto.subtle.digest("SHA-256", await chunks[index].arrayBuffer());
+    clips.push({
+      segmentId: `segment-${index + 1}`,
+      bytes: chunks[index].size,
+      sha256: [...new Uint8Array(hash)].map(value => value.toString(16).padStart(2, "0")).join("")
+    });
+  }
+  return { chunks, clips };
+}
+
+function downloadManifest(bookId, clips) {
+  return {
+    book: { id: bookId, title: "Download lifecycle", kind: "epub", segments: [] },
+    clips
+  };
+}
+
+async function testLateDownloadDoesNotUndoDeletion() {
+  globalThis.indexedDB = memoryIndexedDB();
+  const library = new OfflineLibrary();
+  const { chunks, clips } = await clipFixture();
+  const second = deferred();
+  const manifest = downloadManifest("in-flight-delete", clips);
+  const waitingOnSecond = deferred();
+  const task = library.download(manifest, async segmentId => {
+    if (segmentId === "segment-1") return chunks[0];
+    waitingOnSecond.resolve();
+    return second.promise;
+  });
+  await waitingOnSecond.promise;
+  assert.equal((await library.getBook(manifest.book.id)).downloaded, 1);
+  await library.removeBook(manifest.book.id);
+  second.resolve(chunks[1]);
+  await assert.rejects(task, { name: "AbortError" });
+  assert.equal(await library.getBook(manifest.book.id), undefined);
+  assert.equal(await library.getClip(manifest.book.id, "segment-1"), undefined);
+  assert.equal(await library.getClip(manifest.book.id, "segment-2"), undefined);
+  assert.deepEqual(await library.listBooks(), []);
+}
+
+async function testNewDownloadSupersedesOlderWriter() {
+  globalThis.indexedDB = memoryIndexedDB();
+  const library = new OfflineLibrary();
+  const { chunks, clips } = await clipFixture(["old", "new"]);
+  // Two valid manifests for the same ID but different audio hashes.
+  const older = downloadManifest("overlap", [clips[0]]);
+  const newer = downloadManifest("overlap", [clips[1]]);
+  const firstRequest = deferred();
+  const firstWaiting = deferred();
+  const first = library.download(older, async () => {
+    firstWaiting.resolve();
+    return firstRequest.promise;
+  });
+  await firstWaiting.promise;
+  const replacement = await library.download(newer, async () => chunks[1]);
+  assert.equal(replacement.ready, true);
+  firstRequest.resolve(chunks[0]);
+  await assert.rejects(first, { name: "AbortError" });
+  assert.equal((await library.getBook(newer.book.id)).ready, true);
+  assert.equal((await library.getClip(newer.book.id, "segment-2")).size, chunks[1].size);
+  assert.equal(await library.getClip(newer.book.id, "segment-1"), undefined);
+}
+
+async function testCancelAndResumePreservePartialProgress() {
+  globalThis.indexedDB = memoryIndexedDB();
+  const library = new OfflineLibrary();
+  const { chunks, clips } = await clipFixture();
+  const manifest = downloadManifest("cancel-retry", clips);
+  const controller = new AbortController();
+  const next = deferred();
+  const enteredSecond = deferred();
+  const task = library.download(manifest, async segmentId => {
+    if (segmentId === "segment-1") return chunks[0];
+    enteredSecond.resolve();
+    return next.promise; // Simulates an upstream that ignores AbortSignal.
+  }, () => {}, { signal: controller.signal });
+  await enteredSecond.promise;
+  controller.abort();
+  next.resolve(chunks[1]);
+  await assert.rejects(task, { name: "AbortError" });
+  const partial = await library.getBook(manifest.book.id);
+  assert.equal(partial.ready, false);
+  assert.equal(partial.downloaded, 1);
+  const requested = [];
+  const finished = await library.download(manifest, async segmentId => {
+    requested.push(segmentId);
+    return chunks[1];
+  });
+  assert.deepEqual(requested, ["segment-2"],
+    "valid first clip should be reused without downloading it again");
+  assert.equal(finished.downloaded, 2);
+  assert.equal(finished.ready, true);
+}
+
 await testDeletedLegacyBookDoesNotResurrect();
 await testDeleteBeforeInitialListing();
-console.log("PASS: Reader offline library deletion/migration regressions");
+await testLateDownloadDoesNotUndoDeletion();
+await testNewDownloadSupersedesOlderWriter();
+await testCancelAndResumePreservePartialProgress();
+console.log("PASS: Reader offline migration and download lifecycle regressions");
