@@ -74,6 +74,88 @@ async function restoreLegacyBook(book) {
 
 const clipKey = (bookId, segmentId) => `${bookId}:${segmentId}`;
 
+function offlineAbort(message = "离线下载已取消。") {
+  const error = new Error(message);
+  error.name = "AbortError";
+  return error;
+}
+
+function assertActive(signal) {
+  if (signal?.aborted) throw offlineAbort();
+}
+
+// All asynchronous download writes are committed behind the persisted owner
+// token. A delete, newer download, or another tab can invalidate an older run.
+async function ownedDownloadWrite(bookId, token, { book, clipId, audio, signal } = {}) {
+  assertActive(signal);
+  const db = await openDatabase();
+  return new Promise((resolve, reject) => {
+    const tx = db.transaction([BOOKS, CLIPS], "readwrite");
+    const books = tx.objectStore(BOOKS);
+    const clips = tx.objectStore(CLIPS);
+    const request = books.get(bookId);
+    let written = false;
+    request.onsuccess = () => {
+      const current = request.result;
+      if (signal?.aborted || !current || isDeletedBook(current) ||
+          current.__cvrDownloadToken !== token) return;
+      if (clipId != null) clips.put(audio, clipKey(bookId, clipId));
+      books.put(book, bookId);
+      written = true;
+    };
+    tx.oncomplete = () => { db.close(); resolve(written); };
+    tx.onerror = () => { db.close(); reject(tx.error); };
+    tx.onabort = () => { db.close(); reject(tx.error); };
+  });
+}
+
+async function beginDownload(book, manifest, token, previous, signal) {
+  assertActive(signal);
+  const db = await openDatabase();
+  return new Promise((resolve, reject) => {
+    const tx = db.transaction(BOOKS, "readwrite");
+    const store = tx.objectStore(BOOKS);
+    const request = store.get(book.id);
+    let saved = null;
+    request.onsuccess = () => {
+      if (signal?.aborted) return;
+      const current = request.result;
+      const annotated = current && !isDeletedBook(current)
+        ? current : previous;
+      saved = { ...book, manifest, ready: false, downloaded: 0,
+        annotations: annotated?.pendingAnnotationsAt ? annotated.annotations : book.annotations,
+        annotationsUpdatedAt: annotated?.pendingAnnotationsAt
+          ? annotated.annotationsUpdatedAt : book.annotationsUpdatedAt,
+        pendingAnnotationsAt: annotated?.pendingAnnotationsAt || null,
+        __cvrDownloadToken: token };
+      store.put(saved, book.id);
+    };
+    tx.oncomplete = () => { db.close(); resolve(saved); };
+    tx.onerror = () => { db.close(); reject(tx.error); };
+    tx.onabort = () => { db.close(); reject(tx.error); };
+  });
+}
+
+async function writeClipIfLive(bookId, segmentId, audio) {
+  const db = await openDatabase();
+  return new Promise((resolve, reject) => {
+    const tx = db.transaction([BOOKS, CLIPS], "readwrite");
+    const store = tx.objectStore(BOOKS);
+    const request = store.get(bookId);
+    let allowed = false;
+    request.onsuccess = () => {
+      if (request.result && !isDeletedBook(request.result)) {
+        tx.objectStore(CLIPS).put(audio, clipKey(bookId, segmentId));
+        allowed = true;
+      }
+    };
+    tx.oncomplete = () => { db.close(); resolve(allowed); };
+    tx.onerror = () => { db.close(); reject(tx.error); };
+    tx.onabort = () => { db.close(); reject(tx.error); };
+  });
+}
+
+
 export class OfflineLibrary {
   async getBook(id) {
     let book = await transaction(BOOKS, "readonly", store => store.get(id));
@@ -90,8 +172,10 @@ export class OfflineLibrary {
     let clip = await transaction(CLIPS, "readonly", store => store.get(key));
     if (clip !== undefined) return clip;
     clip = await transaction(CLIPS, "readonly", store => store.get(key), { legacy: true });
-    if (clip !== undefined) await this.putClip(bookId, segmentId, clip);
-    return clip;
+    if (clip !== undefined) {
+      return (await writeClipIfLive(bookId, segmentId, clip)) ? clip : undefined;
+    }
+    return undefined;
   }
 
   putBook(book) {
@@ -99,12 +183,25 @@ export class OfflineLibrary {
   }
 
   async updateBook(id, changes) {
-    const current = await this.getBook(id);
-    if (current) await this.putBook({ ...current, ...changes });
+    // Read/merge/write in one transaction, not with an awaited stale getBook().
+    const db = await openDatabase();
+    return new Promise((resolve, reject) => {
+      const tx = db.transaction(BOOKS, "readwrite");
+      const store = tx.objectStore(BOOKS);
+      const request = store.get(id);
+      request.onsuccess = () => {
+        if (request.result && !isDeletedBook(request.result)) {
+          store.put({ ...request.result, ...changes, id }, id);
+        }
+      };
+      tx.oncomplete = () => { db.close(); resolve(); };
+      tx.onerror = () => { db.close(); reject(tx.error); };
+      tx.onabort = () => { db.close(); reject(tx.error); };
+    });
   }
 
   putClip(bookId, segmentId, audio) {
-    return transaction(CLIPS, "readwrite", store => store.put(audio, clipKey(bookId, segmentId)));
+    return writeClipIfLive(bookId, segmentId, audio);
   }
 
   async listBooks() {
@@ -123,43 +220,63 @@ export class OfflineLibrary {
 
   async removeBook(id) {
     const book = await this.getBook(id);
-    // Write the tombstone first so interruption or a subsequent list/get cannot
-    // re-import the old book. A deliberate putBook can later add it again.
-    await transaction(BOOKS, "readwrite", store => store.put({ id, __cvrDeleted: true }, id));
-    for (const clip of book?.manifest?.clips || []) {
-      await transaction(CLIPS, "readwrite", store => store.delete(clipKey(id, clip.segmentId)));
-    }
-    // Legacy DB remains intact for rollback; the tombstone blocks re-import.
+    const db = await openDatabase();
+    await new Promise((resolve, reject) => {
+      const tx = db.transaction([BOOKS, CLIPS], "readwrite");
+      // Atomically fence pending downloads and remove their already stored clips.
+      tx.objectStore(BOOKS).put({ id, __cvrDeleted: true }, id);
+      for (const clip of book?.manifest?.clips || []) {
+        tx.objectStore(CLIPS).delete(clipKey(id, clip.segmentId));
+      }
+      tx.oncomplete = () => { db.close(); resolve(); };
+      tx.onerror = () => { db.close(); reject(tx.error); };
+      tx.onabort = () => { db.close(); reject(tx.error); };
+    });
+    // Legacy DB remains untouched for rollback; the tombstone blocks re-import.
   }
 
-  async download(manifest, fetchAudio, onProgress = () => {}) {
-    if (!globalThis.crypto?.subtle) throw new Error("音频校验需要 HTTPS 或 localhost。 ");
+  async download(manifest, fetchAudio, onProgress = () => {}, { signal } = {}) {
+    if (!globalThis.crypto?.subtle || !globalThis.crypto?.randomUUID) {
+      throw new Error("音频校验需要 HTTPS 或 localhost。");
+    }
+    assertActive(signal);
     const book = manifest.book;
     const expected = manifest.clips;
+    const token = crypto.randomUUID();
     const previous = await this.getBook(book.id);
-    const saved = { ...book, manifest, ready: false, downloaded: 0,
-      annotations: previous?.pendingAnnotationsAt ? previous.annotations : book.annotations,
-      annotationsUpdatedAt: previous?.pendingAnnotationsAt ? previous.annotationsUpdatedAt : book.annotationsUpdatedAt,
-      pendingAnnotationsAt: previous?.pendingAnnotationsAt || null };
-    await this.putBook(saved);
+    const saved = await beginDownload(book, manifest, token, previous, signal);
+    if (!saved) throw offlineAbort();
+
+    const digest = async blob => {
+      const hash = await crypto.subtle.digest("SHA-256", await blob.arrayBuffer());
+      return [...new Uint8Array(hash)].map(value => value.toString(16).padStart(2, "0")).join("");
+    };
+
     for (const [index, clip] of expected.entries()) {
+      assertActive(signal);
       let audio = await this.getClip(book.id, clip.segmentId);
-      const digest = async blob => {
-        const hash = await crypto.subtle.digest("SHA-256", await blob.arrayBuffer());
-        return [...new Uint8Array(hash)].map(value => value.toString(16).padStart(2, "0")).join("");
-      };
       if (!audio || audio.size !== clip.bytes || await digest(audio) !== clip.sha256) {
-        audio = await fetchAudio(clip.segmentId);
+        assertActive(signal);
+        audio = await fetchAudio(clip.segmentId, { signal });
       }
+      assertActive(signal);
       if (audio.size !== clip.bytes) throw new Error(`音频大小不匹配：${clip.segmentId}`);
       if (await digest(audio) !== clip.sha256) throw new Error(`音频校验失败：${clip.segmentId}`);
-      await this.putClip(book.id, clip.segmentId, audio);
+      assertActive(signal);
       saved.downloaded = index + 1;
-      await this.putBook(saved);
+      if (!await ownedDownloadWrite(book.id, token, {
+        book: { ...saved }, clipId: clip.segmentId, audio, signal
+      })) {
+        throw offlineAbort("离线下载已被删除或更新的任务取代。");
+      }
       onProgress(index + 1, expected.length);
     }
+
+    assertActive(signal);
     saved.ready = true;
-    await this.putBook(saved);
+    if (!await ownedDownloadWrite(book.id, token, { book: { ...saved }, signal })) {
+      throw offlineAbort("离线下载已被删除或更新的任务取代。");
+    }
     return saved;
   }
 }
