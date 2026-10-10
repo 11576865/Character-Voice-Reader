@@ -132,6 +132,53 @@ async function seedLegacyBook(indexedDB, book, clip) {
   });
 }
 
+async function testFirstClipAccessMigratesItsLegacyOwner() {
+  const indexedDB = memoryIndexedDB();
+  globalThis.indexedDB = indexedDB;
+  const library = new OfflineLibrary();
+  const book = {
+    id: "b-" + "c".repeat(24), title: "Legacy without listing",
+    manifest: { clips: [{ segmentId: "segment-1" }] }
+  };
+  await seedLegacyBook(indexedDB, book, { size: 321 });
+
+  // A clip lookup must work before the first getBook()/listBooks() call.
+  assert.equal((await library.getClip(book.id, "segment-1"))?.size, 321,
+    "clip-first reads must lazily migrate their legacy owning book");
+  const current = indexedDB.databases.get("character-voice-reader-offline");
+  assert.equal(current.stores.get("books").get(book.id).title, book.title);
+  assert.equal(current.stores.get("clips").get(book.id + ":segment-1").size, 321);
+  assert.equal((await library.getBook(book.id)).title, book.title);
+
+  await library.removeBook(book.id);
+  assert.equal(await library.getClip(book.id, "segment-1"), undefined,
+    "deletion tombstone must still prevent a second lazy migration");
+  assert.equal(current.stores.get("clips").has(book.id + ":segment-1"), false);
+  assert.equal(current.stores.get("books").get(book.id).__cvrDeleted, true);
+  assert.equal(indexedDB.databases.get("cvs-offline-library")
+    .stores.get("clips").has(book.id + ":segment-1"), true,
+    "rollback-compatible legacy data remains untouched");
+}
+
+async function testClipFirstAccessDoesNotImportLegacyOrphans() {
+  const indexedDB = memoryIndexedDB();
+  globalThis.indexedDB = indexedDB;
+  const library = new OfflineLibrary();
+  const legacyBook = {
+    id: "b-" + "d".repeat(24), title: "Formerly owned",
+    manifest: { clips: [{ segmentId: "segment-1" }] }
+  };
+  await seedLegacyBook(indexedDB, legacyBook, { size: 4 });
+  const legacyStore = indexedDB.databases.get("cvs-offline-library").stores.get("books");
+  legacyStore.delete(legacyBook.id); // orphaned legacy clip with no owning book
+
+  assert.equal(await library.getClip(legacyBook.id, "segment-1"), undefined,
+    "a standalone legacy clip may not be copied to a missing book");
+  const current = indexedDB.databases.get("character-voice-reader-offline");
+  assert.equal(current.stores.get("clips").has(legacyBook.id + ":segment-1"), false);
+  assert.equal(current.stores.get("books").has(legacyBook.id), false);
+}
+
 async function testDeletedLegacyBookDoesNotResurrect() {
   const indexedDB = memoryIndexedDB();
   globalThis.indexedDB = indexedDB;
@@ -321,6 +368,8 @@ async function testDeletePurgesOrphanedAudioFromPriorManifest() {
   assert.equal(raw.has(neighbor + ":keep"), true, "repeated deletion must not affect other books");
 }
 
+await testFirstClipAccessMigratesItsLegacyOwner();
+await testClipFirstAccessDoesNotImportLegacyOrphans();
 await testDeletedLegacyBookDoesNotResurrect();
 await testDeleteBeforeInitialListing();
 await testDeletePurgesOrphanedAudioFromPriorManifest();
