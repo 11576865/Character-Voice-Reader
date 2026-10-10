@@ -1,0 +1,26 @@
+name: Reader real IndexedDB regressions
+
+on:
+  push:
+    paths:
+      - 'web/js/offline.js'
+      - 'tests/test_offline_browser.py'
+      - '.github/workflows/offline-browser.yml'
+  pull_request:
+    paths:
+      - 'web/js/offline.js'
+      - 'tests/test_offline_browser.py'
+      - '.github/workflows/offline-browser.yml'
+
+jobs:
+  chromium-indexeddb:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - run: python -m pip install playwright==1.56.0
+      - run: python -m playwright install --with-deps chromium
+      - run: python tests/test_offline_browser.py
