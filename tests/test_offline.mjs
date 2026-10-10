@@ -48,6 +48,7 @@ function memoryIndexedDB() {
       return {
         get: key => this.request(() => store.get(key)),
         getAll: () => this.request(() => [...store.values()]),
+        getAllKeys: () => this.request(() => [...store.keys()]),
         put: (value, key) => this.request(() => { store.set(key, value); return key; }),
         delete: key => this.request(() => { store.delete(key); })
       };
@@ -283,8 +284,46 @@ async function testCancelAndResumePreservePartialProgress() {
   assert.equal(finished.ready, true);
 }
 
+async function testDeletePurgesOrphanedAudioFromPriorManifest() {
+  const indexedDB = memoryIndexedDB();
+  globalThis.indexedDB = indexedDB;
+  const library = new OfflineLibrary();
+  const id = "b-" + "a".repeat(24);
+  const neighbor = "b-" + "a".repeat(23) + "b";
+  const clipA = { segmentId: "old-segment" };
+  const clipB = { segmentId: "new-segment" };
+
+  await library.putBook({
+    id, title: "Old manifest",
+    manifest: { clips: [clipA] }
+  });
+  await library.putClip(id, clipA.segmentId, { size: 10 });
+  await library.putBook({
+    id, title: "New manifest",
+    manifest: { clips: [clipB] }
+  });
+  await library.putClip(id, clipB.segmentId, { size: 20 });
+  await library.putBook({
+    id: neighbor, title: "Different book",
+    manifest: { clips: [{ segmentId: "keep" }] }
+  });
+  await library.putClip(neighbor, "keep", { size: 30 });
+
+  const raw = indexedDB.databases.get("character-voice-reader-offline").stores.get("clips");
+  assert.equal(raw.has(id + ":old-segment"), true, "prior manifest clip must exist before deletion");
+  await library.removeBook(id);
+  assert.equal(raw.has(id + ":old-segment"), false, "orphan clip must be physically deleted");
+  assert.equal(raw.has(id + ":new-segment"), false, "current manifest clip must be deleted");
+  assert.equal(raw.has(neighbor + ":keep"), true, "another book's audio must remain untouched");
+  assert.equal((await library.getClip(neighbor, "keep")).size, 30);
+  assert.equal(await library.getBook(id), undefined);
+  await library.removeBook(id);
+  assert.equal(raw.has(neighbor + ":keep"), true, "repeated deletion must not affect other books");
+}
+
 await testDeletedLegacyBookDoesNotResurrect();
 await testDeleteBeforeInitialListing();
+await testDeletePurgesOrphanedAudioFromPriorManifest();
 await testLateDownloadDoesNotUndoDeletion();
 await testNewDownloadSupersedesOlderWriter();
 await testCancelAndResumePreservePartialProgress();
