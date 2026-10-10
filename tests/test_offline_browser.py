@@ -1090,6 +1090,139 @@ def check_current_clip_owner_atomic_read_cross_tab(browser, origin):
         context.close()
 
 
+
+def check_cross_tab_deletion_stops_active_audio_and_pending_book_open(browser, origin):
+    """Committed deletion revokes active playback UI in other Reader tabs."""
+    context = browser.new_context(viewport={"width": 390, "height": 780})
+    reader, manager = context.new_page(), context.new_page()
+    errors = []
+    reader.on("pageerror", lambda error: errors.append("reader: " + str(error)))
+    manager.on("pageerror", lambda error: errors.append("manager: " + str(error)))
+    try:
+        reader.goto(origin + "/reader-ui", wait_until="domcontentloaded")
+        manager.goto(origin + "/reader-ui", wait_until="domcontentloaded")
+        reader.get_by_text("暂无本机离线书籍", exact=False).wait_for()
+        manager.get_by_text("暂无本机离线书籍", exact=False).wait_for()
+        reader.evaluate("""async () => {
+          const { OfflineLibrary } = await import("/reader-assets/js/offline.js");
+          const { segmentDocument } = await import("/reader-assets/js/segmenter.js");
+          const library = new OfflineLibrary();
+          const rate = 16000, frames = rate * 6, buffer = new ArrayBuffer(44 + frames * 2);
+          const view = new DataView(buffer);
+          const text = (at, value) => {
+            for (let i = 0; i < value.length; i++) view.setUint8(at + i, value.charCodeAt(i));
+          };
+          text(0, "RIFF"); view.setUint32(4, 36 + frames * 2, true);
+          text(8, "WAVE"); text(12, "fmt ");
+          view.setUint32(16, 16, true); view.setUint16(20, 1, true);
+          view.setUint16(22, 1, true); view.setUint32(24, rate, true);
+          view.setUint32(28, rate * 2, true); view.setUint16(32, 2, true);
+          view.setUint16(34, 16, true); text(36, "data");
+          view.setUint32(40, frames * 2, true);
+          for (let i = 0; i < frames; i++) {
+            view.setInt16(44 + i * 2,
+              Math.floor(3500 * Math.sin(i * 2 * Math.PI * 330 / rate)), true);
+          }
+          for (const [letter, title] of [
+            ["a", "跨标签播放中"], ["b", "其他离线书"], ["c", "等待打开的书"]
+          ]) {
+            const id = "b-" + letter.repeat(24);
+            const document = { title, chapters: [{
+              title: "正文", paragraphs: ["这是一段用于跨标签页删除测试的文字。"]
+            }] };
+            const segments = segmentDocument(document).map((segment, index) => ({
+              ...segment, id: letter + "-sound-" + index
+            }));
+            await library.putBook({
+              id, title, kind: "epub", document, segments, ready: true,
+              downloaded: segments.length,
+              manifest: { clips: segments.map(x => ({ segmentId: x.id })) }
+            });
+            for (const segment of segments) {
+              await library.putClip(id, segment.id,
+                new Blob([buffer], { type: "audio/wav" }));
+            }
+          }
+        }""")
+        reader.locator("#refreshOfflineBooks").click()
+        manager.locator("#refreshOfflineBooks").click()
+        reader.get_by_text("跨标签播放中", exact=True).wait_for()
+        manager.get_by_text("跨标签播放中", exact=True).wait_for()
+        reader.locator(".offline-book-row").filter(has_text="跨标签播放中") \
+            .get_by_role("button", name="打开阅读").click()
+        reader.wait_for_function("""() => document.querySelector("#source")
+          .textContent.includes("跨标签播放中") && !document.querySelector("#start").disabled""")
+        reader.locator("#start").click()
+        reader.wait_for_function("""() => {
+          const audio = document.querySelector("#audio");
+          return !audio.paused && audio.currentTime > 0.1 && audio.duration > 5;
+        }""", timeout=7500)
+
+        # Deletion of a different book must update the shelf but keep playing.
+        manager.evaluate("""async () => {
+          const { OfflineLibrary } = await import("/reader-assets/js/offline.js");
+          await new OfflineLibrary().removeBook("b-" + "b".repeat(24));
+        }""")
+        reader.wait_for_function("""() => document.querySelectorAll(".offline-book-row").length === 2""")
+        assert reader.locator("#audio").evaluate("(a) => !a.paused && a.src.startsWith('blob:')"), \
+            "Deleting an unrelated book must not interrupt ongoing playback"
+        assert "跨标签播放中" in reader.locator("#source").inner_text()
+
+        # Deleting the active book through the other tab's real UI must stop
+        # the already-acquired Blob; IndexedDB read fencing alone cannot do so.
+        item = manager.locator(".offline-book-row").filter(has_text="跨标签播放中")
+        item.get_by_role("button", name="删除本机副本").click()
+        item.get_by_role("button", name="确认删除").click()
+        reader.wait_for_function("""() => {
+          const audio = document.querySelector("#audio");
+          return audio.paused && !audio.getAttribute("src")
+            && document.querySelector("#source").textContent.includes("未加载")
+            && document.querySelector("#status").textContent.includes("另一个标签页删除")
+            && document.querySelector("#start").disabled;
+        }""", timeout=7500)
+        reader.wait_for_function("""() => document.querySelectorAll(".offline-book-row").length === 1""")
+        assert "等待打开的书" in reader.locator("#offlineBooks").inner_text()
+        assert not reader.locator("#documentBody").get_by_text(
+            "这是一段用于跨标签页删除测试的文字", exact=False
+        ).count(), "Deleted book's text must not remain as the active document"
+
+        # An older pending getBook() completion must not reopen a book after
+        # another tab confirms deletion; the old result is intentionally held.
+        reader.evaluate("""async () => {
+          const { OfflineLibrary } = await import("/reader-assets/js/offline.js");
+          const original = OfflineLibrary.prototype.getBook;
+          const pending = "b-" + "c".repeat(24);
+          window.pendingOfflineOpen = false;
+          OfflineLibrary.prototype.getBook = async function(id) {
+            const book = await original.call(this, id);
+            if (id !== pending) return book;
+            window.pendingOfflineOpen = true;
+            return new Promise(resolve => {
+              window.releasePendingOfflineOpen = () => resolve(book);
+            });
+          };
+        }""")
+        reader.locator(".offline-book-row").filter(has_text="等待打开的书") \
+            .get_by_role("button", name="打开阅读").click()
+        reader.wait_for_function("window.pendingOfflineOpen")
+        manager.evaluate("""async () => {
+          const { OfflineLibrary } = await import("/reader-assets/js/offline.js");
+          await new OfflineLibrary().removeBook("b-" + "c".repeat(24));
+        }""")
+        reader.wait_for_function("""() => document.querySelector("#status")
+          .textContent.includes("另一个标签页删除")""", timeout=7000)
+        reader.evaluate("""async () => {
+          window.releasePendingOfflineOpen();
+          await new Promise(resolve => setTimeout(resolve, 0));
+        }""")
+        assert "未加载" in reader.locator("#source").inner_text()
+        assert reader.locator("#start").is_disabled()
+        reader.get_by_text("暂无本机离线书籍", exact=False).wait_for()
+        assert not errors, "Cross-tab deletion caused browser errors: " + repr(errors)
+    finally:
+        context.close()
+
+
 def main():
     # Keep the optional Playwright dependency out of the default pytest collection.
     from playwright.sync_api import sync_playwright
@@ -1108,6 +1241,7 @@ def main():
                 check_delete_reclaims_orphaned_manifest_clips(browser, origin)
                 check_clip_first_legacy_migration_is_tombstone_safe(browser, origin)
                 check_current_clip_owner_atomic_read_cross_tab(browser, origin)
+                check_cross_tab_deletion_stops_active_audio_and_pending_book_open(browser, origin)
                 check_offline_shelf_ui_without_service(browser, origin)
                 check_late_book_open_cannot_replace_newer_source(browser, origin)
                 check_real_offline_audio_playback(browser, origin)
