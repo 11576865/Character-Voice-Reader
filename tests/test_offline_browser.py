@@ -1015,6 +1015,81 @@ def check_clip_first_legacy_migration_is_tombstone_safe(browser, origin):
         context.close()
 
 
+
+def check_current_clip_owner_atomic_read_cross_tab(browser, origin):
+    """Validate a real multi-store readonly IDB snapshot and cross-tab deletion."""
+    context = browser.new_context()
+    reader, deletion = context.new_page(), context.new_page()
+    try:
+        prepare(reader, origin)
+        prepare(deletion, origin)
+        assert reader.evaluate("""async () => {
+          const id = "b-" + "7".repeat(24);
+          const library = newLibrary();
+          await library.putBook({ id, title: "Atomic current snapshot" });
+          await library.putClip(id, "one", audioBlob("saved"));
+
+          const original = IDBDatabase.prototype.transaction;
+          const scopes = [];
+          IDBDatabase.prototype.transaction = function(names, mode, ...args) {
+            if (this.name === "character-voice-reader-offline" && mode === "readonly") {
+              scopes.push(Array.isArray(names) ? [...names] : [names]);
+            }
+            return original.call(this, names, mode, ...args);
+          };
+          const result = await library.getClip(id, "one");
+          const singleSnapshot = result?.size === 5 && scopes.length === 1
+            && scopes[0].length === 2 && scopes[0][0] === "books"
+            && scopes[0][1] === "clips";
+          window.clipReadScopes = scopes;
+          return singleSnapshot;
+        }"""), "current clip and live owner must be read atomically in one real IndexedDB transaction"
+
+        # Cross-tab deletion must remain observable on the next lookup.
+        assert deletion.evaluate("""async () => {
+          const id = "b-" + "7".repeat(24);
+          await newLibrary().removeBook(id);
+          return await newLibrary().getBook(id) === undefined;
+        }""")
+        assert reader.evaluate("""async () => {
+          const id = "b-" + "7".repeat(24);
+          const library = newLibrary();
+          const clip = await library.getClip(id, "one");
+          const db = await new Promise((resolve, reject) => {
+            const request = indexedDB.open("character-voice-reader-offline", 1);
+            request.onsuccess = () => resolve(request.result);
+            request.onerror = () => reject(request.error);
+          });
+          const result = await new Promise((resolve, reject) => {
+            const tx = db.transaction(["books", "clips"], "readonly");
+            const b = tx.objectStore("books").get(id);
+            const c = tx.objectStore("clips").get(id + ":one");
+            tx.oncomplete = () => resolve({
+              deleted: b.result?.__cvrDeleted, clipExists: c.result !== undefined
+            });
+            tx.onerror = () => reject(tx.error);
+          });
+          db.close();
+          return clip === undefined && result.deleted === true
+            && result.clipExists === false;
+        }"""), "after a committed cross-tab deletion, no cached clip is readable"
+
+        # Explicit re-add must not retain the old clip from the deleted owner.
+        assert deletion.evaluate("""async () => {
+          const id = "b-" + "7".repeat(24);
+          const library = newLibrary();
+          await library.putBook({ id, title: "Explicitly new edition" });
+          return await library.getClip(id, "one") === undefined;
+        }""")
+        assert reader.evaluate("""async () => {
+          const id = "b-" + "7".repeat(24);
+          await newLibrary().putClip(id, "one", audioBlob("new"));
+          return (await newLibrary().getClip(id, "one"))?.size === 3;
+        }""")
+    finally:
+        context.close()
+
+
 def main():
     # Keep the optional Playwright dependency out of the default pytest collection.
     from playwright.sync_api import sync_playwright
@@ -1032,6 +1107,7 @@ def main():
                 check_cancel_keeps_verified_partial_audio_for_resume(browser, origin)
                 check_delete_reclaims_orphaned_manifest_clips(browser, origin)
                 check_clip_first_legacy_migration_is_tombstone_safe(browser, origin)
+                check_current_clip_owner_atomic_read_cross_tab(browser, origin)
                 check_offline_shelf_ui_without_service(browser, origin)
                 check_late_book_open_cannot_replace_newer_source(browser, origin)
                 check_real_offline_audio_playback(browser, origin)
