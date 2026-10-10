@@ -176,6 +176,34 @@ async function testPrefetchFailureDoesNotFanOut() {
   assert.equal(queue.index, 1);
 }
 
+async function testResumeRejectionCanRecover() {
+  const player = fakePlayer();
+  let blockedOnce = true;
+  player.resume = async () => {
+    if (blockedOnce) {
+      blockedOnce = false;
+      const error = new Error("The play() request was blocked by browser policy");
+      error.name = "NotAllowedError";
+      throw error;
+    }
+  };
+  const queue = new ReaderQueue({
+    player,
+    async requestAudio() { return new Blob(["audio"]); }
+  });
+  await queue.start([{ index: 0, text: "A" }], { voice: "offline-local" });
+  queue.pause();
+  const index = queue.snapshot.index;
+  await queue.resume();
+  assert.equal(queue.state, "paused", "browser rejection must leave playback resumable");
+  assert.equal(queue.snapshot.error?.name, "NotAllowedError",
+    "resume rejection must be preserved for user-visible status");
+  assert.equal(queue.snapshot.index, index, "resume failure must preserve reading location");
+  await queue.resume();
+  assert.equal(queue.state, "playing", "a later explicit user retry should succeed");
+  assert.equal(queue.snapshot.error, null, "successful resume must clear the old failure");
+}
+
 async function testPauseStopSemantics() {
   const player = fakePlayer();
   const queue = new ReaderQueue({
@@ -201,5 +229,6 @@ await testRetryOnceThenError();
 await testManualRetryAfterError();
 await testPrefetchFailureDoesNotFanOut();
 await testPauseStopSemantics();
+await testResumeRejectionCanRecover();
 
 console.log("PASS: ReaderQueue resilient playback tests");
