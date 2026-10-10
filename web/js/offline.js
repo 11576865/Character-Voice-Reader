@@ -74,6 +74,29 @@ async function restoreLegacyBook(book) {
 
 const clipKey = (bookId, segmentId) => `${bookId}:${segmentId}`;
 
+// Read authorization (live owner) and the media blob from one IndexedDB
+// snapshot. A separate books transaction followed by a clips transaction
+// could observe different revisions when another tab deletes the book.
+async function readCurrentClipWithOwner(bookId, segmentId) {
+  const db = await openDatabase();
+  return new Promise((resolve, reject) => {
+    const tx = db.transaction([BOOKS, CLIPS], "readonly");
+    const request = tx.objectStore(BOOKS).get(bookId);
+    let owner;
+    let clip;
+    request.onsuccess = () => {
+      owner = request.result;
+      if (owner && !isDeletedBook(owner)) {
+        const media = tx.objectStore(CLIPS).get(clipKey(bookId, segmentId));
+        media.onsuccess = () => { clip = media.result; };
+      }
+    };
+    tx.oncomplete = () => { db.close(); resolve({ owner, clip }); };
+    tx.onerror = () => { db.close(); reject(tx.error); };
+    tx.onabort = () => { db.close(); reject(tx.error); };
+  });
+}
+
 function offlineAbort(message = "离线下载已取消。") {
   const error = new Error(message);
   error.name = "AbortError";
@@ -165,21 +188,24 @@ export class OfflineLibrary {
   }
 
   async getClip(bookId, segmentId) {
-    // The first access may be to a clip, before getBook() or listBooks().
-    // Restore its owning legacy book first; writeClipIfLive below refuses
-    // to import orphan audio or audio belonging to a tombstoned book.
-    let currentBook = await transaction(BOOKS, "readonly", store => store.get(bookId));
-    if (isDeletedBook(currentBook)) return undefined;
-    if (currentBook === undefined) {
-      currentBook = await this.getBook(bookId);
-      if (!currentBook) return undefined;
+    // Clip authorization and current audio must use the same transaction.
+    // A legacy clip-first read may lazily restore its owning book; then take
+    // a fresh atomic snapshot before reading the current clip.
+    let { owner, clip } = await readCurrentClipWithOwner(bookId, segmentId);
+    if (isDeletedBook(owner)) return undefined;
+    if (owner === undefined) {
+      if (!await this.getBook(bookId)) return undefined;
+      ({ owner, clip } = await readCurrentClipWithOwner(bookId, segmentId));
+      if (!owner || isDeletedBook(owner)) return undefined;
     }
-    const key = clipKey(bookId, segmentId);
-    let clip = await transaction(CLIPS, "readonly", store => store.get(key));
     if (clip !== undefined) return clip;
-    clip = await transaction(CLIPS, "readonly", store => store.get(key), { legacy: true });
-    if (clip !== undefined) {
-      return (await writeClipIfLive(bookId, segmentId, clip)) ? clip : undefined;
+
+    const legacy = await transaction(CLIPS, "readonly",
+      store => store.get(clipKey(bookId, segmentId)), { legacy: true });
+    if (legacy !== undefined) {
+      // Its own readwrite transaction verifies the owner again: a delete
+      // occurring during legacy I/O may not revive the removed audio.
+      return (await writeClipIfLive(bookId, segmentId, legacy)) ? legacy : undefined;
     }
     return undefined;
   }
