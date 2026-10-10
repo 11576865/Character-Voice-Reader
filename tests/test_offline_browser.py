@@ -522,17 +522,39 @@ def check_real_offline_audio_playback(browser, origin):
         held_time = page.locator("#audio").evaluate("(audio) => audio.currentTime")
         assert abs(held_time - paused_time) < 0.12, \
             "Pause must preserve real media position"
-        page.locator("#start").click()  # Resume
+        page.evaluate("""() => {
+          const original = HTMLMediaElement.prototype.play;
+          let rejectOnce = true;
+          HTMLMediaElement.prototype.play = function(...args) {
+            if (rejectOnce) {
+              rejectOnce = false;
+              return Promise.reject(new DOMException(
+                "Playback requires a user gesture", "NotAllowedError"));
+            }
+            return original.apply(this, args);
+          };
+        }""")
+        page.locator("#start").click()  # Browser rejects the first resume
+        page.wait_for_function("""() => document.querySelector("#status")
+          .textContent.includes("继续播放失败")""")
+        assert "NotAllowedError" not in page.locator("#status").inner_text(), (
+            "The UI should present the media error message, not a raw exception name"
+        )
+        assert page.locator("#audio").evaluate("(el) => el.paused"), (
+            "Denied resume must not advance playback or discard its position"
+        )
+        assert not page.locator("#start").is_disabled(), (
+            "Resume must remain available after a transient autoplay rejection"
+        )
+        page.locator("#start").click()  # Explicit second try succeeds
         page.wait_for_function("""() => {
           const audio = document.querySelector("#audio");
           return !audio.paused && audio.currentTime > 0;
         }""")
+        assert "继续播放失败" not in page.locator("#status").inner_text()
         page.wait_for_function("""() =>
           document.querySelector("#status").textContent.includes("朗读完成")""",
           timeout=9000)
-        assert page.locator("#readingProgress").evaluate(
-            "(el) => Number(el.value) === 2 and Number(el.max) === 2"
-        ) if False else True
         assert page.locator("#readingProgress").evaluate(
             "(el) => Number(el.value) === 2 && Number(el.max) === 2"
         ), "Both real audio clips should advance the reading progress"
