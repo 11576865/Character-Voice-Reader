@@ -1038,12 +1038,14 @@ button.danger-subtle:hover:not(:disabled) {
 /* Reader v9: searchable offline shelf. */
 .offline-shelf-filters {
   display: grid;
-  grid-template-columns: minmax(180px, 1.8fr) minmax(160px, 1fr) minmax(170px, 1fr);
+  grid-template-columns: minmax(180px, 1.8fr) minmax(145px, 1fr) minmax(150px, 1fr) auto;
   gap: 10px;
   align-items: end;
   margin: 12px 0;
 }
 .offline-shelf-filters label { margin-bottom: 5px; }
+.offline-filter-actions { display: flex; align-items: end; }
+.offline-filter-actions button { min-height: 42px; }
 .offline-shelf-filters input,
 .offline-shelf-filters select { min-height: 42px; }
 .offline-book-row.is-current {
@@ -1057,6 +1059,7 @@ button.danger-subtle:hover:not(:disabled) {
 @media (max-width: 760px) {
   .offline-shelf-filters { grid-template-columns: repeat(2, minmax(0, 1fr)); }
   .offline-search-field { grid-column: 1 / -1; }
+  .offline-filter-actions button { width: 100%; }
 }
 @media (max-width: 380px) {
   .offline-shelf-filters { grid-template-columns: minmax(0, 1fr); }
