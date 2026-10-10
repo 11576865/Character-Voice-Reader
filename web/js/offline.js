@@ -5,6 +5,61 @@ const CLIPS = "clips";
 // Keep a deletion marker in the new database while legacy records remain for rollback.
 const isDeletedBook = book => book?.__cvrDeleted === true;
 
+// Notify other tabs only after the deletion transaction commits. The
+// announcement is an invalidation hint; receivers must never assume it
+// replaces the persisted owner/tombstone checks.
+const DELETION_CHANNEL = "cvr.offline-library-deletions-v1";
+const DELETION_STORAGE_KEY = "cvr.offline-library-deletion-event";
+const deletionSender = globalThis.crypto?.randomUUID?.() ||
+  `reader-${Date.now()}-${Math.random()}`;
+
+function validDeletionEvent(message) {
+  return message?.type === "book-deleted" &&
+    typeof message.bookId === "string" && message.bookId.length > 0 &&
+    message.bookId.length <= 256 && message.sender !== deletionSender;
+}
+
+function publishOfflineBookDeletion(bookId) {
+  const message = { type: "book-deleted", bookId, sender: deletionSender };
+  if (typeof globalThis.BroadcastChannel === "function") {
+    try {
+      const channel = new BroadcastChannel(DELETION_CHANNEL);
+      channel.postMessage(message);
+      channel.close();
+      return;
+    } catch (_) { /* Attempt the storage-event fallback. */ }
+  }
+  try {
+    globalThis.localStorage?.setItem(DELETION_STORAGE_KEY,
+      JSON.stringify({ ...message, nonce: Math.random() }));
+  } catch (_) { /* Notifications are best-effort; the committed tombstone wins. */ }
+}
+
+export function observeOfflineBookDeletions(onDeleted) {
+  if (typeof globalThis.BroadcastChannel === "function") {
+    try {
+      const channel = new BroadcastChannel(DELETION_CHANNEL);
+      channel.onmessage = event => {
+        if (validDeletionEvent(event.data)) onDeleted(event.data.bookId);
+      };
+      return () => channel.close();
+    } catch (_) { /* Fall back to the cross-tab storage event. */ }
+  }
+  if (typeof globalThis.addEventListener === "function") {
+    const listener = event => {
+      if (event.key !== DELETION_STORAGE_KEY || !event.newValue) return;
+      try {
+        const message = JSON.parse(event.newValue);
+        if (validDeletionEvent(message)) onDeleted(message.bookId);
+      } catch (_) { /* Ignore malformed or unrelated storage events. */ }
+    };
+    globalThis.addEventListener("storage", listener);
+    return () => globalThis.removeEventListener("storage", listener);
+  }
+  return () => {};
+}
+
+
 function openDatabase(name = DB, { create = true } = {}) {
   return new Promise((resolve, reject) => {
     if (!globalThis.indexedDB) return reject(new Error("此浏览器不支持离线书库。"));
@@ -273,6 +328,9 @@ export class OfflineLibrary {
       tx.onerror = () => { db.close(); reject(tx.error); };
       tx.onabort = () => { db.close(); reject(tx.error); };
     });
+    // The tombstone and audio purge are committed before any other tab is
+    // asked to stop using its previously acquired media Blob.
+    publishOfflineBookDeletion(id);
     // Legacy DB remains untouched for rollback; the tombstone blocks re-import.
   }
 
