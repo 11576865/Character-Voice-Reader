@@ -1227,11 +1227,9 @@ def check_cross_tab_deletion_stops_active_audio_and_pending_book_open(browser, o
 def check_cross_tab_deletion_storage_event_fallback(browser, origin):
     """Storage events deliver committed deletes when BroadcastChannel is unavailable."""
     context = browser.new_context()
-    context.add_init_script("""() => {
-      Object.defineProperty(globalThis, "BroadcastChannel", {
-        configurable: true, value: undefined
-      });
-    }""")
+    context.add_init_script("""Object.defineProperty(globalThis, "BroadcastChannel", {
+      configurable: true, value: undefined
+    });""")
     receiver, deleter = context.new_page(), context.new_page()
     try:
         prepare(receiver, origin)
