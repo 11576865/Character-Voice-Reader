@@ -921,6 +921,100 @@ def check_quota_estimate_is_advisory_and_recovery_is_actionable(browser, origin)
         context.close()
 
 
+
+def check_clip_first_legacy_migration_is_tombstone_safe(browser, origin):
+    """A legacy clip is readable even if the legacy book has never been listed."""
+    context = browser.new_context()
+    first, second = context.new_page(), context.new_page()
+    try:
+        prepare(first, origin)
+        prepare(second, origin)
+        first.evaluate("""async () => {
+          const db = await new Promise((resolve, reject) => {
+            const request = indexedDB.open("cvs-offline-library", 1);
+            request.onupgradeneeded = () => {
+              request.result.createObjectStore("books");
+              request.result.createObjectStore("clips");
+            };
+            request.onsuccess = () => resolve(request.result);
+            request.onerror = () => reject(request.error);
+          });
+          const book = "b-" + "e".repeat(24);
+          const other = "b-" + "f".repeat(24);
+          await new Promise((resolve, reject) => {
+            const tx = db.transaction(["books", "clips"], "readwrite");
+            tx.objectStore("books").put({
+              id: book, title: "Legacy clip first",
+              manifest: { clips: [{ segmentId: "part-1" }] }
+            }, book);
+            tx.objectStore("books").put({
+              id: other, title: "Delete before clip read",
+              manifest: { clips: [{ segmentId: "part-1" }] }
+            }, other);
+            tx.objectStore("clips").put(audioBlob("historic"), book + ":part-1");
+            tx.objectStore("clips").put(audioBlob("deleted"), other + ":part-1");
+            tx.oncomplete = resolve;
+            tx.onerror = () => reject(tx.error);
+            tx.onabort = () => reject(tx.error);
+          });
+          db.close();
+        }""")
+        assert second.evaluate("""async () => {
+          const id = "b-" + "e".repeat(24);
+          const library = newLibrary();
+          const blob = await library.getClip(id, "part-1");
+          const owner = await library.getBook(id);
+          const database = await new Promise((resolve, reject) => {
+            const request = indexedDB.open("character-voice-reader-offline", 1);
+            request.onsuccess = () => resolve(request.result);
+            request.onerror = () => reject(request.error);
+          });
+          const current = await new Promise((resolve, reject) => {
+            const tx = database.transaction(["books", "clips"], "readonly");
+            const book = tx.objectStore("books").get(id);
+            const clip = tx.objectStore("clips").get(id + ":part-1");
+            let found = false;
+            clip.onsuccess = () => { found = clip.result?.size === 8; };
+            tx.oncomplete = () => resolve(found && book.result?.id === id);
+            tx.onerror = () => reject(tx.error);
+          });
+          database.close();
+          return blob?.size === 8 && owner?.title === "Legacy clip first" && current;
+        }"""), "clip-first access must lazily restore both the book and clip"
+
+        # Deleting a still-unlisted legacy owner in another tab must block
+        # all future lazy reads; neither the clip nor its owner can reappear.
+        first.evaluate("""async () => {
+          await newLibrary().removeBook("b-" + "f".repeat(24));
+        }""")
+        assert second.evaluate("""async () => {
+          const id = "b-" + "f".repeat(24);
+          const library = newLibrary();
+          return (await library.getClip(id, "part-1")) === undefined
+            && (await library.getBook(id)) === undefined
+            && !(await library.listBooks()).some(book => book.id === id);
+        }"""), "clip-first migration must not bypass cross-tab deletion tombstones"
+
+        # The legacy rollback database was not modified by the migration.
+        assert first.evaluate("""async () => {
+          const db = await new Promise((resolve, reject) => {
+            const request = indexedDB.open("cvs-offline-library", 1);
+            request.onsuccess = () => resolve(request.result);
+            request.onerror = () => reject(request.error);
+          });
+          const count = await new Promise((resolve, reject) => {
+            const tx = db.transaction("clips", "readonly");
+            const request = tx.objectStore("clips").count();
+            request.onsuccess = () => resolve(request.result);
+            request.onerror = () => reject(request.error);
+          });
+          db.close();
+          return count === 2;
+        }""")
+    finally:
+        context.close()
+
+
 def main():
     # Keep the optional Playwright dependency out of the default pytest collection.
     from playwright.sync_api import sync_playwright
@@ -937,6 +1031,7 @@ def main():
                 check_cross_tab_new_download_supersedes_stale_writer(browser, origin)
                 check_cancel_keeps_verified_partial_audio_for_resume(browser, origin)
                 check_delete_reclaims_orphaned_manifest_clips(browser, origin)
+                check_clip_first_legacy_migration_is_tombstone_safe(browser, origin)
                 check_offline_shelf_ui_without_service(browser, origin)
                 check_late_book_open_cannot_replace_newer_source(browser, origin)
                 check_real_offline_audio_playback(browser, origin)
