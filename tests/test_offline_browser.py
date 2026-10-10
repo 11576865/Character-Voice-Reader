@@ -752,6 +752,175 @@ def check_offline_shelf_search_filter_sort_and_refresh(browser, origin):
         context.close()
 
 
+
+def check_quota_estimate_is_advisory_and_recovery_is_actionable(browser, origin):
+    """Estimated free bytes are not newly required bytes in a resumable download."""
+    context = browser.new_context(viewport={"width": 390, "height": 780})
+    page = context.new_page()
+    errors = []
+    page.on("pageerror", lambda error: errors.append(str(error)))
+    try:
+        page.goto(origin + "/reader-ui", wait_until="domcontentloaded")
+        page.get_by_text("暂无本机离线书籍", exact=False).wait_for()
+        page.evaluate("""async () => {
+          const { OfflineLibrary } = await import("/reader-assets/js/offline.js");
+          const { segmentDocument } = await import("/reader-assets/js/segmenter.js");
+          const bookId = "b-" + "8".repeat(24);
+          const model = { title: "空间恢复测试", chapters: [{
+            title: "章节", paragraphs: ["已缓存的声音。", "等待下载的声音。"]
+          }] };
+          const segments = segmentDocument(model).map((part, index) => ({
+            ...part, id: "quota-part-" + index
+          }));
+          const blobs = segments.map((_, i) =>
+            new Blob(["clip-" + i], { type: "audio/mpeg" }));
+          const clips = await Promise.all(blobs.map(async (blob, i) => {
+            const hash = await crypto.subtle.digest("SHA-256", await blob.arrayBuffer());
+            return {
+              segmentId: segments[i].id, bytes: blob.size,
+              sha256: [...new Uint8Array(hash)].map(n =>
+                n.toString(16).padStart(2, "0")).join("")
+            };
+          }));
+          const book = {
+            id: bookId, title: model.title, kind: "epub", author: "测试",
+            document: model, segments
+          };
+          window.quotaFixture = {
+            book, manifest: { book, clips, totalBytes: 20 * 1024 * 1024 },
+            blobs, fetched: [], persistAttempts: 0
+          };
+          const library = new OfflineLibrary();
+          await library.putBook({
+            ...book, manifest: window.quotaFixture.manifest,
+            ready: false, downloaded: 1
+          });
+          await library.putClip(bookId, segments[0].id, blobs[0]);
+
+          Object.defineProperty(navigator, "storage", {
+            configurable: true,
+            value: {
+              estimate: async () => ({ quota: 100, usage: 95 }),
+              persist: async () => {
+                window.quotaFixture.persistAttempts++;
+                throw new DOMException("Not permitted", "NotAllowedError");
+              }
+            }
+          });
+
+          const nativeFetch = window.fetch.bind(window);
+          window.fetch = (input, options) => {
+            const path = new URL(String(input), location.href).pathname;
+            if (path === "/v1/books") {
+              return Promise.resolve(Response.json({
+                books: [{ id: bookId, title: book.title, kind: "epub" }]
+              }));
+            }
+            if (path === "/v1/books/" + bookId) {
+              return Promise.resolve(Response.json(book));
+            }
+            if (path === "/v1/books/" + bookId + "/versions") {
+              return Promise.resolve(Response.json({}));
+            }
+            if (path === "/v1/books/" + bookId + "/progress") {
+              return Promise.resolve(Response.json({}));
+            }
+            if (path === "/v1/books/" + bookId + "/job") {
+              return Promise.resolve(Response.json({ status: "idle", completed: 0, total: 2 }));
+            }
+            if (path === "/v1/books/" + bookId + "/generation-history") {
+              return Promise.resolve(Response.json({ items: [] }));
+            }
+            if (path === "/v1/books/" + bookId + "/offline-manifest") {
+              return Promise.resolve(Response.json(window.quotaFixture.manifest));
+            }
+            if (path.startsWith("/v1/books/" + bookId + "/offline-audio/")) {
+              const segment = decodeURIComponent(path.split("/").at(-1));
+              const index = segments.findIndex(part => part.id === segment);
+              if (index < 0) return Promise.resolve(new Response("", { status: 404 }));
+              window.quotaFixture.fetched.push(segment);
+              return Promise.resolve(new Response(blobs[index], {
+                headers: { "Content-Type": "audio/mpeg" }
+              }));
+            }
+            return nativeFetch(input, options);
+          };
+        }""")
+        page.locator("#offlineStorageDetails > summary").click()
+        page.locator("#refreshOfflineStorage").click()
+        page.get_by_text("估算可用 0.0 MiB", exact=False).wait_for()
+        assert "浏览器估算" in page.locator("#offlineStorageUsage").inner_text()
+        assert page.locator("#offlineStorageRecovery").is_hidden()
+
+        page.locator("#libraryPanel").evaluate("(node) => { node.open = true; }")
+        page.locator("#loadLibrary").click()
+        page.get_by_role("button", name="空间恢复测试 · EPUB").wait_for()
+        page.get_by_role("button", name="空间恢复测试 · EPUB").click()
+        page.wait_for_function("""() => document.querySelector("#source")
+          .textContent.includes("空间恢复测试")""")
+        page.locator("#downloadBook").click()
+        page.wait_for_function("""() => document.querySelector("#jobStatus")
+          .textContent.includes("整本书已下载并校验")""", timeout=12000)
+        assert page.evaluate("""async () => {
+          const { OfflineLibrary } = await import("/reader-assets/js/offline.js");
+          const library = new OfflineLibrary();
+          const book = await library.getBook(window.quotaFixture.book.id);
+          const second = await library.getClip(book.id, "quota-part-1");
+          return book?.ready === true && book.downloaded === 2 && second?.size === 6
+            && window.quotaFixture.fetched.join(",") === "quota-part-1"
+            && window.quotaFixture.persistAttempts > 0;
+        }"""), "Valid cached clip must be reusable even when the quota estimate is lower than manifest.totalBytes"
+
+        # Storage persistence/estimate APIs are best effort; their exceptions
+        # must not abort verified cached re-downloads.
+        page.evaluate("""() => {
+          navigator.storage.estimate = async () => {
+            throw new DOMException("Storage estimate denied", "NotAllowedError");
+          };
+        }""")
+        page.locator("#refreshOfflineStorage").click()
+        page.get_by_text("此浏览器暂不提供可用的存储估算", exact=False).wait_for()
+
+        # A genuine QuotaExceededError coming from the offline adapter must
+        # yield an actionable recovery UI. Do not silently delete any book.
+        page.evaluate("""async () => {
+          const { OfflineLibrary } = await import("/reader-assets/js/offline.js");
+          const original = OfflineLibrary.prototype.download;
+          window.quotaFixture.rejectNext = true;
+          OfflineLibrary.prototype.download = function(...args) {
+            if (window.quotaFixture.rejectNext) {
+              window.quotaFixture.rejectNext = false;
+              return Promise.reject(new DOMException(
+                "Failed to store a new clip", "QuotaExceededError"
+              ));
+            }
+            return original.apply(this, args);
+          };
+        }""")
+        page.locator("#downloadBook").click()
+        page.wait_for_function("""() => document.querySelector("#jobStatus")
+          .textContent.includes("浏览器存储配额不足")""", timeout=9000)
+        assert page.locator("#offlineStorageRecovery").is_visible()
+        assert page.locator("#offlineStorageDetails").evaluate("(node) => node.open")
+        assert page.locator("#offlineStorageRecovery a").get_attribute("href") == \
+            "#offlineLibraryPanel"
+        assert not page.locator("#downloadBook").is_disabled(), \
+            "Quota failures should leave explicit manual retry available"
+        assert page.evaluate("""async () => {
+          const { OfflineLibrary } = await import("/reader-assets/js/offline.js");
+          return (await new OfflineLibrary().getBook(window.quotaFixture.book.id))?.ready;
+        }"""), "A quota diagnostic must not delete saved data"
+
+        page.locator("#downloadBook").click()
+        page.wait_for_function("""() => document.querySelector("#jobStatus")
+          .textContent.includes("整本书已下载并校验")""", timeout=10000)
+        assert page.locator("#offlineStorageRecovery").is_hidden(), \
+            "Successful retry should dismiss stale storage warning"
+        assert not errors, "Unexpected quota UI browser exceptions: " + repr(errors)
+    finally:
+        context.close()
+
+
 def main():
     # Keep the optional Playwright dependency out of the default pytest collection.
     from playwright.sync_api import sync_playwright
@@ -773,6 +942,7 @@ def main():
                 check_real_offline_audio_playback(browser, origin)
                 check_mobile_touch_reader_controls(browser, origin)
                 check_offline_shelf_search_filter_sort_and_refresh(browser, origin)
+                check_quota_estimate_is_advisory_and_recovery_is_actionable(browser, origin)
             finally:
                 browser.close()
     finally:

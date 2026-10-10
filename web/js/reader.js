@@ -45,6 +45,10 @@ const ui = {
   jobStatus: element("jobStatus"), downloadBook: element("downloadBook"),
   cancelOfflineDownload: element("cancelOfflineDownload"),
   offlineLibraryStatus: element("offlineLibraryStatus"),
+  offlineStorageDetails: element("offlineStorageDetails"),
+  offlineStorageUsage: element("offlineStorageUsage"),
+  refreshOfflineStorage: element("refreshOfflineStorage"),
+  offlineStorageRecovery: element("offlineStorageRecovery"),
   offlineSearch: element("offlineSearch"),
   offlineFilter: element("offlineFilter"),
   offlineSort: element("offlineSort"),
@@ -1525,6 +1529,7 @@ function renderOfflineBookRows() {
                 { author: "" }, null, "未加载");
             }
             await renderOfflineBooks();
+            await refreshStorageEstimate();
             ui.offlineLibraryStatus.textContent = `已删除《${book.title || "未命名书籍"}》的本机副本。`;
           } catch (error) {
             confirm.disabled = false;
@@ -1609,6 +1614,45 @@ async function openOfflineBook(bookId) {
   }
 }
 
+function storageMiB(bytes) {
+  return `${(bytes / (1024 * 1024)).toFixed(1)} MiB`;
+}
+
+async function readStorageEstimate() {
+  try {
+    const estimate = await navigator.storage?.estimate?.();
+    return Number.isFinite(estimate?.usage) && Number.isFinite(estimate?.quota)
+      && estimate.quota > 0 ? estimate : null;
+  } catch (_) {
+    // StorageManager is an advisory API, not a download prerequisite.
+    return null;
+  }
+}
+
+async function refreshStorageEstimate() {
+  ui.refreshOfflineStorage.disabled = true;
+  try {
+    const estimate = await readStorageEstimate();
+    if (!estimate) {
+      ui.offlineStorageUsage.textContent =
+        "此浏览器暂不提供可用的存储估算；下载仍可尝试。";
+      return;
+    }
+    const remaining = Math.max(0, estimate.quota - estimate.usage);
+    ui.offlineStorageUsage.textContent =
+      `浏览器估算：已用 ${storageMiB(estimate.usage)} / 配额 ${storageMiB(estimate.quota)} · 估算可用 ${storageMiB(remaining)}。`;
+  } finally {
+    ui.refreshOfflineStorage.disabled = false;
+  }
+}
+
+function isOfflineQuotaError(error) {
+  const name = error?.name || error?.cause?.name || "";
+  return name === "QuotaExceededError" || name === "NS_ERROR_DOM_QUOTA_REACHED"
+    || /quota.{0,18}(exceed|reach)|storage.{0,18}full|存储空间不足|配额不足/i
+      .test(String(error?.message || ""));
+}
+
 async function downloadWholeBook() {
   if (!currentBookId || offlineMode) {
     ui.jobStatus.textContent = "请先打开电脑书库中的已生成书籍。";
@@ -1623,6 +1667,7 @@ async function downloadWholeBook() {
   const signal = run.controller.signal;
   offlineDownload = run;
   ui.downloadBook.disabled = true;
+  ui.offlineStorageRecovery.hidden = true;
   ui.offlineDownloadIndicator.hidden = false;
   ui.offlineDownloadProgress.max = 1;
   ui.offlineDownloadProgress.value = 0;
@@ -1634,11 +1679,22 @@ async function downloadWholeBook() {
       `/v1/books/${run.bookId}/offline-manifest`, { signal });
     const manifest = await response.json();
     if (signal.aborted) throw new DOMException("下载已取消", "AbortError");
-    const estimate = await navigator.storage?.estimate?.();
-    if (estimate && estimate.quota - estimate.usage < manifest.totalBytes) {
-      throw new Error("本设备剩余浏览器存储空间不足。");
+    const estimate = await readStorageEstimate();
+    if (signal.aborted) throw new DOMException("下载已取消", "AbortError");
+    // totalBytes includes previously cached, verified audio. A browser quota
+    // estimate is approximate; never reject a resumable download based only
+    // on comparing it with the entire manifest.
+    if (estimate && Number.isFinite(manifest.totalBytes) &&
+        estimate.quota - estimate.usage < manifest.totalBytes) {
+      ui.offlineDownloadLabel.textContent = "估算空间偏紧，正在尝试复用已缓存音频……";
+      ui.jobStatus.textContent =
+        "浏览器估算可用空间小于整书音频总量；已缓存片段可能复用，将尝试下载。";
     }
-    await navigator.storage?.persist?.();
+    try {
+      await navigator.storage?.persist?.();
+    } catch (_) {
+      // A denied/unavailable persistence request does not prevent IndexedDB.
+    }
     if (signal.aborted) throw new DOMException("下载已取消", "AbortError");
 
     ui.offlineDownloadProgress.max = Math.max(1, manifest.clips.length);
@@ -1661,9 +1717,16 @@ async function downloadWholeBook() {
     }
   } catch (error) {
     if (offlineDownload === run) {
-      ui.jobStatus.textContent = error?.name === "AbortError"
-        ? "离线下载已取消；已校验片段可在下一次下载时复用。"
-        : `离线下载未完成：${error.message}。再次点击可续传。`;
+      if (isOfflineQuotaError(error)) {
+        ui.offlineStorageRecovery.hidden = false;
+        ui.offlineStorageDetails.open = true;
+        ui.jobStatus.textContent =
+          "离线下载因浏览器存储配额不足而停止。已保存片段可续传；请先清理不需要的本机副本。";
+      } else {
+        ui.jobStatus.textContent = error?.name === "AbortError"
+          ? "离线下载已取消；已校验片段可在下一次下载时复用。"
+          : `离线下载未完成：${error.message}。再次点击可续传。`;
+      }
     }
   } finally {
     if (offlineDownload === run) {
@@ -1672,7 +1735,7 @@ async function downloadWholeBook() {
       ui.downloadBook.disabled = false;
       ui.cancelOfflineDownload.disabled = true;
       ui.offlineDownloadIndicator.hidden = true;
-      await renderOfflineBooks();
+      await Promise.all([renderOfflineBooks(), refreshStorageEstimate()]);
       ui.offlineLibraryStatus.textContent = finalStatus;
     }
   }
@@ -2097,6 +2160,7 @@ ui.retryGeneration.addEventListener("click", retryWholeBook);
 ui.suggestSpeakers.addEventListener("click", loadSpeakerSuggestions);
 ui.downloadBook.addEventListener("click", downloadWholeBook);
 ui.refreshOfflineBooks.addEventListener("click", renderOfflineBooks);
+ui.refreshOfflineStorage.addEventListener("click", refreshStorageEstimate);
 ui.offlineSearch.addEventListener("input", renderOfflineBookRows);
 ui.offlineFilter.addEventListener("change", renderOfflineBookRows);
 ui.offlineSort.addEventListener("change", renderOfflineBookRows);
