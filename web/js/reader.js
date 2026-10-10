@@ -43,6 +43,7 @@ const ui = {
   continuousEmotion: element("continuousEmotion"),
   cancelGeneration: element("cancelGeneration"), libraryBooks: element("libraryBooks"),
   jobStatus: element("jobStatus"), downloadBook: element("downloadBook"),
+  cancelOfflineDownload: element("cancelOfflineDownload"),
   offlineBooks: element("offlineBooks"), exportEpub: element("exportEpub"),
   exportWav: element("exportWav"), selectedParagraphLabel: element("selectedParagraphLabel"),
   suggestSpeakers: element("suggestSpeakers"), speakerSuggestions: element("speakerSuggestions"),
@@ -164,6 +165,7 @@ let sourceBuffer = null;
 let sourceKind = null;
 let jobPoll = null;
 let offlineMode = false;
+let offlineDownload = null;
 let previewAudio = null;
 let annotations = {};
 let selectedParagraph = null;
@@ -957,6 +959,7 @@ function showDocument(model, metadata, id, label) {
 }
 
 function stopForSourceChange() {
+  offlineDownload?.controller.abort();
   regenerationController?.abort();
   regenerationController = null;
   saveProgress(true);
@@ -1392,6 +1395,7 @@ async function renderOfflineBooks() {
       const remove = document.createElement("button");
       remove.textContent = `删除 ${book.title} 的本机副本`;
       remove.addEventListener("click", async () => {
+        if (offlineDownload?.bookId === book.id) offlineDownload.controller.abort();
         await offlineLibrary.removeBook(book.id);
         await renderOfflineBooks();
       });
@@ -1431,25 +1435,56 @@ async function downloadWholeBook() {
     ui.jobStatus.textContent = "请先打开电脑书库中的已生成书籍。";
     return;
   }
+  if (offlineDownload) {
+    ui.jobStatus.textContent = "已有离线下载正在进行。可先取消，或等待完成。";
+    return;
+  }
+
+  const run = { bookId: currentBookId, controller: new AbortController() };
+  const signal = run.controller.signal;
+  offlineDownload = run;
+  ui.downloadBook.disabled = true;
+  ui.cancelOfflineDownload.disabled = false;
   try {
     ui.jobStatus.textContent = "正在准备整本书离线清单与压缩音频……";
-    const manifest = await (await libraryFetch(
-      `/v1/books/${currentBookId}/offline-manifest`)).json();
+    const response = await libraryFetch(
+      `/v1/books/${run.bookId}/offline-manifest`, { signal });
+    const manifest = await response.json();
+    if (signal.aborted) throw new DOMException("下载已取消", "AbortError");
     const estimate = await navigator.storage?.estimate?.();
     if (estimate && estimate.quota - estimate.usage < manifest.totalBytes) {
-      throw new Error("本设备剩余浏览器存储空间不足。 ");
+      throw new Error("本设备剩余浏览器存储空间不足。");
     }
     await navigator.storage?.persist?.();
-    const bookId = currentBookId;
-    await offlineLibrary.download(manifest, async segmentId => {
-      const response = await libraryFetch(`/v1/books/${bookId}/offline-audio/${segmentId}`);
-      return response.blob();
-    }, (done, total) => { ui.jobStatus.textContent = `正在下载并校验：${done}/${total}`; });
-    ui.jobStatus.textContent = "整本书已下载并校验，可关闭电脑后离线听读。";
-    await renderOfflineBooks();
+    if (signal.aborted) throw new DOMException("下载已取消", "AbortError");
+
+    await offlineLibrary.download(manifest, async (segmentId, { signal: requestSignal }) => {
+      const audioResponse = await libraryFetch(
+        `/v1/books/${run.bookId}/offline-audio/${segmentId}`,
+        { signal: requestSignal });
+      return audioResponse.blob();
+    }, (done, total) => {
+      if (offlineDownload === run && !signal.aborted) {
+        ui.jobStatus.textContent = `正在下载并校验：${done}/${total}`;
+      }
+    }, { signal });
+
+    if (offlineDownload === run && !signal.aborted) {
+      ui.jobStatus.textContent = "整本书已下载并校验，可关闭电脑后离线听读。";
+    }
   } catch (error) {
-    ui.jobStatus.textContent = `离线下载未完成：${error.message}。再次点击可续传。`;
-    await renderOfflineBooks();
+    if (offlineDownload === run) {
+      ui.jobStatus.textContent = error?.name === "AbortError"
+        ? "离线下载已取消；已校验片段可在下一次下载时复用。"
+        : `离线下载未完成：${error.message}。再次点击可续传。`;
+    }
+  } finally {
+    if (offlineDownload === run) {
+      offlineDownload = null;
+      ui.downloadBook.disabled = false;
+      ui.cancelOfflineDownload.disabled = true;
+      await renderOfflineBooks();
+    }
   }
 }
 
@@ -1847,6 +1882,7 @@ ui.resumeGeneration.addEventListener("click", resumeWholeBook);
 ui.retryGeneration.addEventListener("click", retryWholeBook);
 ui.suggestSpeakers.addEventListener("click", loadSpeakerSuggestions);
 ui.downloadBook.addEventListener("click", downloadWholeBook);
+ui.cancelOfflineDownload.addEventListener("click", () => offlineDownload?.controller.abort());
 ui.exportEpub.addEventListener("click", exportEpub);
 ui.exportWav.addEventListener("click", exportWav);
 ui.cancelGeneration.addEventListener("click", async () => {
