@@ -179,6 +179,7 @@ let sourceKind = null;
 let jobPoll = null;
 let offlineMode = false;
 let pendingOfflineOpenId = null;
+let suspendedOfflineOpenId = null;
 let offlineDownload = null;
 let offlineListRevision = 0;
 let offlineBooksSnapshot = [];
@@ -988,6 +989,7 @@ function stopForSourceChange() {
   ++importSerial;
   loading = false;
   pendingOfflineOpenId = null;
+  suspendedOfflineOpenId = null;
   clearTimeout(jobPoll);
   jobPoll = null;
   offlineDownload?.controller.abort();
@@ -2243,6 +2245,14 @@ window.addEventListener("online", syncOfflineChanges);
 let stopOfflineDeletionObserver =
   observeOfflineBookDeletions(onRemoteOfflineBookDeleted);
 window.addEventListener("pagehide", () => {
+  // A pending getBook() can resolve after a BFCache revival. Invalidate its
+  // source serial *before* the document freezes, then retry against current
+  // IndexedDB state on pageshow instead of consuming the old result.
+  const pendingBookId = pendingOfflineOpenId;
+  if (pendingBookId) {
+    stopForSourceChange();
+    suspendedOfflineOpenId = pendingBookId;
+  }
   stopOfflineDeletionObserver?.();
   stopOfflineDeletionObserver = null;
 });
@@ -2252,6 +2262,13 @@ window.addEventListener("pageshow", () => {
     stopOfflineDeletionObserver =
       observeOfflineBookDeletions(onRemoteOfflineBookDeleted);
     void renderOfflineBooks(); // Reconcile any shelf updates while frozen.
+    if (suspendedOfflineOpenId) {
+      const bookId = suspendedOfflineOpenId;
+      suspendedOfflineOpenId = null;
+      // openOfflineBook fences any remaining stale result and checks the
+      // durable tombstone instead of trusting the pre-pagehide book object.
+      void openOfflineBook(bookId);
+    }
     if (offlineMode && currentBookId) {
       const bookId = currentBookId;
       void offlineLibrary.getBook(bookId).then(book => {
