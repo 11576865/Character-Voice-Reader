@@ -165,9 +165,15 @@ export class OfflineLibrary {
   }
 
   async getClip(bookId, segmentId) {
-    // Deleted books must not expose clips retained in the legacy database.
-    const currentBook = await transaction(BOOKS, "readonly", store => store.get(bookId));
+    // The first access may be to a clip, before getBook() or listBooks().
+    // Restore its owning legacy book first; writeClipIfLive below refuses
+    // to import orphan audio or audio belonging to a tombstoned book.
+    let currentBook = await transaction(BOOKS, "readonly", store => store.get(bookId));
     if (isDeletedBook(currentBook)) return undefined;
+    if (currentBook === undefined) {
+      currentBook = await this.getBook(bookId);
+      if (!currentBook) return undefined;
+    }
     const key = clipKey(bookId, segmentId);
     let clip = await transaction(CLIPS, "readonly", store => store.get(key));
     if (clip !== undefined) return clip;
