@@ -132,6 +132,40 @@ async function seedLegacyBook(indexedDB, book, clip) {
   });
 }
 
+async function testCurrentClipAndOwnerUseOneReadSnapshot() {
+  const indexedDB = memoryIndexedDB();
+  globalThis.indexedDB = indexedDB;
+  const library = new OfflineLibrary();
+  const bookId = "b-" + "6".repeat(24);
+  await library.putBook({ id: bookId, title: "Same-snapshot media owner" });
+  await library.putClip(bookId, "segment", { size: 1024 });
+
+  const db = indexedDB.databases.get("character-voice-reader-offline");
+  const transaction = db.transaction;
+  const scopes = [];
+  db.transaction = function(storeName, mode) {
+    scopes.push({ stores: Array.isArray(storeName) ? [...storeName] : [storeName], mode });
+    return transaction.call(this, storeName, mode);
+  };
+  assert.equal((await library.getClip(bookId, "segment")).size, 1024);
+  assert.deepEqual(scopes, [{ stores: ["books", "clips"], mode: "readonly" }],
+    "validating a live owner and reading its audio must share one readonly transaction");
+
+  scopes.length = 0;
+  await library.removeBook(bookId);
+  scopes.length = 0;
+  assert.equal(await library.getClip(bookId, "segment"), undefined);
+  assert.deepEqual(scopes, [{ stores: ["books", "clips"], mode: "readonly" }],
+    "a deletion tombstone must be recognized without a second clip read");
+
+  scopes.length = 0;
+  await library.putBook({ id: bookId, title: "Explicitly restored" });
+  await library.putClip(bookId, "segment", { size: 34 });
+  scopes.length = 0;
+  assert.equal((await library.getClip(bookId, "segment")).size, 34);
+  assert.deepEqual(scopes, [{ stores: ["books", "clips"], mode: "readonly" }]);
+}
+
 async function testFirstClipAccessMigratesItsLegacyOwner() {
   const indexedDB = memoryIndexedDB();
   globalThis.indexedDB = indexedDB;
@@ -368,6 +402,7 @@ async function testDeletePurgesOrphanedAudioFromPriorManifest() {
   assert.equal(raw.has(neighbor + ":keep"), true, "repeated deletion must not affect other books");
 }
 
+await testCurrentClipAndOwnerUseOneReadSnapshot();
 await testFirstClipAccessMigratesItsLegacyOwner();
 await testClipFirstAccessDoesNotImportLegacyOrphans();
 await testDeletedLegacyBookDoesNotResurrect();
