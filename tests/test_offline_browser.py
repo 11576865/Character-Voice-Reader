@@ -1223,6 +1223,39 @@ def check_cross_tab_deletion_stops_active_audio_and_pending_book_open(browser, o
         context.close()
 
 
+
+def check_cross_tab_deletion_storage_event_fallback(browser, origin):
+    """Storage events deliver committed deletes when BroadcastChannel is unavailable."""
+    context = browser.new_context()
+    context.add_init_script("""() => {
+      Object.defineProperty(globalThis, "BroadcastChannel", {
+        configurable: true, value: undefined
+      });
+    }""")
+    receiver, deleter = context.new_page(), context.new_page()
+    try:
+        prepare(receiver, origin)
+        prepare(deleter, origin)
+        receiver.evaluate("""async () => {
+          const { observeOfflineBookDeletions } = await import("/web/js/offline.js");
+          window.deletionEvents = [];
+          window.closeObserver = observeOfflineBookDeletions(
+            id => window.deletionEvents.push(id));
+        }""")
+        deleter.evaluate("""async () => {
+          const library = newLibrary();
+          const id = "b-" + "0".repeat(24);
+          await library.putBook({ id, title: "Fallback test" });
+          await library.removeBook(id);
+        }""")
+        receiver.wait_for_function("""() => window.deletionEvents.length === 1""")
+        assert receiver.evaluate("""() => window.deletionEvents[0] ===
+          "b-" + "0".repeat(24)""")
+        receiver.evaluate("window.closeObserver()")
+    finally:
+        context.close()
+
+
 def main():
     # Keep the optional Playwright dependency out of the default pytest collection.
     from playwright.sync_api import sync_playwright
@@ -1242,6 +1275,7 @@ def main():
                 check_clip_first_legacy_migration_is_tombstone_safe(browser, origin)
                 check_current_clip_owner_atomic_read_cross_tab(browser, origin)
                 check_cross_tab_deletion_stops_active_audio_and_pending_book_open(browser, origin)
+                check_cross_tab_deletion_storage_event_fallback(browser, origin)
                 check_offline_shelf_ui_without_service(browser, origin)
                 check_late_book_open_cannot_replace_newer_source(browser, origin)
                 check_real_offline_audio_playback(browser, origin)
