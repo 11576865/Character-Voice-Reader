@@ -82,6 +82,7 @@ function memoryIndexedDB() {
       };
       queueMicrotask(() => {
         let db = databases.get(name);
+        const newlyCreated = !db;
         const needsUpgrade = !db || version > db.version;
         if (!db) {
           db = new MemoryDB(name, version);
@@ -92,6 +93,8 @@ function memoryIndexedDB() {
         request.transaction = { abort() { aborted = true; } };
         if (needsUpgrade) request.onupgradeneeded?.();
         if (aborted) {
+          // Aborted versionchange must roll back a newly created database.
+          if (newlyCreated) databases.delete(name);
           request.error = { name: "AbortError" };
           request.onerror?.();
         } else {
