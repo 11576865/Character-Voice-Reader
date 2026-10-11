@@ -1,8 +1,9 @@
 """Real-browser offline storage and Reader lifecycle regression scenarios.
 
 Chromium runs the full suite, including its dedicated real BFCache test.
-Firefox reuses the shared IndexedDB, media and UI scenarios through
-test_offline_firefox.py, but has its own browser installation and CI job.
+Firefox and WebKit reuse the shared IndexedDB, media and UI scenarios
+through test_offline_firefox.py and test_offline_webkit.py, each with its own
+browser engine, audio-output setup and independent CI job.
 Both are separate from pytest's in-memory IndexedDB substitute.
 Run: python tests/test_offline_browser.py
 """
@@ -77,17 +78,81 @@ def check_late_result_after_cross_tab_delete(browser, origin):
         first.evaluate("""async () => {
           const clips = [await clip("part-1", "first"), await clip("part-2", "second")];
           window.secondRequested = false;
+          window.downloadOutcomeResolved = null;
+          window.downloadDiagnostic = {
+            secure: window.isSecureContext,
+            subtle: Boolean(window.crypto?.subtle),
+            randomUUID: Boolean(window.crypto?.randomUUID),
+            phase: "begin"
+          };
+          window.downloadDiagnostic.transactions = [];
+          const nativeTransaction = IDBDatabase.prototype.transaction;
+          IDBDatabase.prototype.transaction = function(stores, mode, ...args) {
+            const tx = nativeTransaction.call(this, stores, mode, ...args);
+            const info = { db: this.name, stores: Array.from(
+              typeof stores === "string" ? [stores] : stores), mode, event: "started" };
+            window.downloadDiagnostic.transactions.push(info);
+            for (const event of ["complete", "abort", "error"]) {
+              tx.addEventListener(event, () => {
+                info.event = event;
+                if (tx.error) info.error = tx.error.name + ":" + tx.error.message;
+              });
+            }
+            return tx;
+          };
+          const library = newLibrary();
+          const oldGetBook = library.getBook.bind(library);
+          library.getBook = async (...args) => {
+            window.downloadDiagnostic.phase = "getBook";
+            const result = await oldGetBook(...args);
+            window.downloadDiagnostic.phase = "getBook-done";
+            return result;
+          };
+          const oldGetClip = library.getClip.bind(library);
+          library.getClip = async (...args) => {
+            window.downloadDiagnostic.phase = "getClip";
+            const result = await oldGetClip(...args);
+            window.downloadDiagnostic.phase = "getClip-done";
+            return result;
+          };
           const delayed = new Promise(resolve => { window.releaseSecond = resolve; });
-          window.downloadOutcome = newLibrary().download(
+          window.downloadOutcome = library.download(
             manifest("browser-delete", clips),
             async id => {
+              window.downloadDiagnostic.phase = "fetchAudio-" + id;
               if (id === "part-1") return audioBlob("first");
               window.secondRequested = true;
               return delayed;  // Simulates a network request ignoring cancellation.
+            },
+            (completed, total) => {
+              window.downloadDiagnostic.progress = [completed, total];
+              window.downloadDiagnostic.phase = "progress-" + completed;
             }
-          ).then(() => "completed", error => "error:" + error.name);
+          ).then(() => "completed", error => "error:" + error.name +
+            ":" + error.message).then(result => {
+              window.downloadOutcomeResolved = result;
+              return result;
+            });
         }""")
-        first.wait_for_function("window.secondRequested === true")
+        try:
+            first.wait_for_function("""() =>
+              window.secondRequested === true ||
+              window.downloadOutcomeResolved !== null""", timeout=16000)
+        except Exception as error:
+            raise AssertionError(
+                "Download stalled before second clip: " +
+                repr(first.evaluate("""() => ({
+                  result: window.downloadOutcomeResolved,
+                  diagnostic: window.downloadDiagnostic
+                })"""))
+            ) from error
+        assert first.evaluate("window.secondRequested === true"), (
+            "Download did not reach second media request: "
+            + repr(first.evaluate("""() => ({
+              result: window.downloadOutcomeResolved,
+              diagnostic: window.downloadDiagnostic
+            })"""))
+        )
         assert second.evaluate("""async () => {
           await newLibrary().removeBook("browser-delete");
           return await newLibrary().getBook("browser-delete") === undefined;
@@ -96,7 +161,7 @@ def check_late_result_after_cross_tab_delete(browser, origin):
           window.releaseSecond(audioBlob("second"));
           return await window.downloadOutcome;
         }""")
-        assert outcome == "error:AbortError", outcome
+        assert outcome.startswith("error:AbortError:"), outcome
         assert second.evaluate("""async () => {
           const library = newLibrary();
           return (await library.getBook("browser-delete")) === undefined
@@ -1030,14 +1095,16 @@ def check_quota_estimate_is_advisory_and_recovery_is_actionable(browser, origin)
 
 
 
-def check_clip_first_legacy_migration_is_tombstone_safe(browser, origin):
-    """A legacy clip is readable even if the legacy book has never been listed."""
+def check_clip_first_legacy_migration_is_tombstone_safe(
+    browser, origin, *, binary_legacy_fixture=False
+):
+    """Old raw Blobs or binary fixtures migrate only with a live owning book."""
     context = browser.new_context()
     first, second = context.new_page(), context.new_page()
     try:
         prepare(first, origin)
         prepare(second, origin)
-        first.evaluate("""async () => {
+        first.evaluate("""async (binaryFixture) => {
           const db = await new Promise((resolve, reject) => {
             const request = indexedDB.open("cvs-offline-library", 1);
             request.onupgradeneeded = () => {
@@ -1059,14 +1126,21 @@ def check_clip_first_legacy_migration_is_tombstone_safe(browser, origin):
               id: other, title: "Delete before clip read",
               manifest: { clips: [{ segmentId: "part-1" }] }
             }, other);
-            tx.objectStore("clips").put(audioBlob("historic"), book + ":part-1");
-            tx.objectStore("clips").put(audioBlob("deleted"), other + ":part-1");
+            const encode = text => binaryFixture
+              ? {
+                  __cvrClipFormat: "cvr-audio-bytes-v1",
+                  type: "audio/mpeg",
+                  bytes: new TextEncoder().encode(text).buffer
+                }
+              : audioBlob(text);
+            tx.objectStore("clips").put(encode("historic"), book + ":part-1");
+            tx.objectStore("clips").put(encode("deleted"), other + ":part-1");
             tx.oncomplete = resolve;
             tx.onerror = () => reject(tx.error);
             tx.onabort = () => reject(tx.error);
           });
           db.close();
-        }""")
+        }""", binary_legacy_fixture)
         assert second.evaluate("""async () => {
           const id = "b-" + "e".repeat(24);
           const library = newLibrary();
@@ -1082,7 +1156,13 @@ def check_clip_first_legacy_migration_is_tombstone_safe(browser, origin):
             const book = tx.objectStore("books").get(id);
             const clip = tx.objectStore("clips").get(id + ":part-1");
             let found = false;
-            clip.onsuccess = () => { found = clip.result?.size === 8; };
+            clip.onsuccess = () => {
+              const stored = clip.result;
+              found = stored?.size === 8 || (
+                stored?.__cvrClipFormat === "cvr-audio-bytes-v1"
+                && stored.bytes?.byteLength === 8
+              );
+            };
             tx.oncomplete = () => resolve(found && book.result?.id === id);
             tx.onerror = () => reject(tx.error);
           });
@@ -1345,19 +1425,52 @@ def check_cross_tab_deletion_storage_event_fallback(browser, origin):
         receiver.evaluate("""async () => {
           const { observeOfflineBookDeletions } = await import("/web/js/offline.js");
           window.deletionEvents = [];
+          window.rawStorageEvents = [];
+          window.addEventListener("storage", event => {
+            window.rawStorageEvents.push({
+              key: event.key, newValue: event.newValue
+            });
+          });
           window.closeObserver = observeOfflineBookDeletions(
             id => window.deletionEvents.push(id));
         }""")
-        deleter.evaluate("""async () => {
+        stored = deleter.evaluate("""async () => {
           const library = newLibrary();
           const id = "b-" + "0".repeat(24);
           await library.putBook({ id, title: "Fallback test" });
           await library.removeBook(id);
+          return {
+            deleted: (await library.getBook(id)) === undefined,
+            localStorageValue: localStorage.getItem("cvr.offline-library-deletion-event"),
+            broadcastChannel: typeof BroadcastChannel
+          };
         }""")
-        receiver.wait_for_function("""() => window.deletionEvents.length === 1""")
+        try:
+            receiver.wait_for_function("""() => window.deletionEvents.length === 1""",
+                                       timeout=7000)
+        except Exception as error:
+            info = receiver.evaluate("""() => ({
+              localStorageValue: localStorage.getItem("cvr.offline-library-deletion-event"),
+              rawStorageEvents: window.rawStorageEvents,
+              deletionEvents: window.deletionEvents,
+              broadcastChannel: typeof BroadcastChannel
+            })""")
+            raise AssertionError(
+                "Storage event fallback failed: sender=" + repr(stored)
+                + " receiver=" + repr(info)
+            ) from error
         assert receiver.evaluate("""() => window.deletionEvents[0] ===
           "b-" + "0".repeat(24)""")
         receiver.evaluate("window.closeObserver()")
+        # A disposed observer must not receive later native storage events or
+        # polling updates, even when BroadcastChannel was unavailable.
+        deleter.evaluate("""async () => {
+          await newLibrary().removeBook("b-" + "1".repeat(24));
+        }""")
+        receiver.wait_for_timeout(1250)  # Exceeds the 1000 ms poll interval.
+        assert receiver.evaluate("window.deletionEvents.length") == 1, (
+            "Unsubscribed offline deletion observer must not keep polling"
+        )
     finally:
         context.close()
 

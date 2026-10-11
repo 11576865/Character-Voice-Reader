@@ -1,0 +1,38 @@
+name: Reader WebKit offline regressions
+
+on:
+  push:
+    paths:
+      - 'web/**'
+      - 'tests/test_offline_browser.py'
+      - 'tests/test_offline_webkit.py'
+      - '.github/workflows/offline-webkit.yml'
+  pull_request:
+    paths:
+      - 'web/**'
+      - 'tests/test_offline_browser.py'
+      - 'tests/test_offline_webkit.py'
+      - '.github/workflows/offline-webkit.yml'
+
+jobs:
+  webkit-offline:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - run: python -m pip install playwright==1.56.0
+      - run: python -m playwright install --with-deps webkit
+      # Headless Linux has no physical audio endpoint. An isolated silent
+      # PulseAudio sink permits real WebKit media lifecycle verification.
+      - name: Provide a WebKit audio output sink
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y pulseaudio pulseaudio-utils
+          pulseaudio --start --exit-idle-time=-1
+          pactl load-module module-null-sink sink_name=cvr_webkit_ci format=s16le rate=48000 channels=2
+          pactl set-default-sink cvr_webkit_ci
+          pactl info
+      - run: python tests/test_offline_webkit.py

@@ -132,6 +132,36 @@ async function seedLegacyBook(indexedDB, book, clip) {
   });
 }
 
+async function testBinaryAudioStorageRetainsBlobApiAndLegacyReads() {
+  const indexedDB = memoryIndexedDB();
+  globalThis.indexedDB = indexedDB;
+  const library = new OfflineLibrary();
+  const id = "b-" + "8".repeat(24);
+  await library.putBook({ id, title: "Binary audio encoding" });
+  const source = new Blob([new Uint8Array([82, 73, 70, 70])],
+    { type: "audio/wav" });
+  assert.equal(await library.putClip(id, "modern", source), true);
+  const raw = indexedDB.databases.get("character-voice-reader-offline")
+    .stores.get("clips");
+  const stored = raw.get(id + ":modern");
+  assert.equal(stored.__cvrClipFormat, "cvr-audio-bytes-v1");
+  assert.equal(stored.type, "audio/wav");
+  assert.equal(stored.bytes.byteLength, 4);
+  assert.ok(stored.bytes instanceof ArrayBuffer,
+    "audio persisted through structured-clone bytes, not direct Blob");
+  const restored = await library.getClip(id, "modern");
+  assert.ok(restored instanceof Blob, "public getClip still returns a Blob");
+  assert.equal(restored.type, "audio/wav");
+  assert.deepEqual([...new Uint8Array(await restored.arrayBuffer())],
+    [82, 73, 70, 70]);
+
+  raw.set(id + ":legacy", new Blob(["old"], { type: "audio/mpeg" }));
+  const previous = await library.getClip(id, "legacy");
+  assert.equal(previous.type, "audio/mpeg");
+  assert.equal(await previous.text(), "old",
+    "previously persisted raw Blob values remain readable");
+}
+
 async function testCurrentClipAndOwnerUseOneReadSnapshot() {
   const indexedDB = memoryIndexedDB();
   globalThis.indexedDB = indexedDB;
@@ -402,6 +432,7 @@ async function testDeletePurgesOrphanedAudioFromPriorManifest() {
   assert.equal(raw.has(neighbor + ":keep"), true, "repeated deletion must not affect other books");
 }
 
+await testBinaryAudioStorageRetainsBlobApiAndLegacyReads();
 await testCurrentClipAndOwnerUseOneReadSnapshot();
 await testFirstClipAccessMigratesItsLegacyOwner();
 await testClipFirstAccessDoesNotImportLegacyOrphans();

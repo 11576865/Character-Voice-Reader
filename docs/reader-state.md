@@ -238,3 +238,30 @@ finished
 - 在 Firefox CI 中显式启动 PulseAudio，并建立独立的 `module-null-sink` 空输出设备。这样仍通过真正的 HTMLAudioElement 驱动媒体时间、暂停、恢复、片段衔接与完成事件，音频输出无声路由，不是替换播放器或绕过 `play()` 断言。
 - 播放器进一步区分原生 `OnMediaSinkAudioError` 并显示“音频输出设备”恢复指引；普通格式损坏仍保持独立错误提示。两类有别的 MediaError 与迟到虚假媒体事件均新增真实浏览器内的定点断言。
 - 完整跨引擎自动化证据以最终 GitHub Actions 最新提交的三组结果为准。即使 Firefox 在此配置下通过，也不能声称物理声卡、耳机、蓝牙输出或 Safari/Android/iOS 自动播放行为通过实机验收。
+
+## WebKit 跨引擎离线回归（2026-10-11）
+
+- 新增单独的 `Reader WebKit offline regressions` GitHub Actions 工作流，以 Playwright 1.56.0 的 **Linux WebKit** 浏览器引擎执行真实 IndexedDB/HTMLAudioElement 行为验证，并保留现有 Chromium 和 Firefox 的独立 CI。测试并非简单更换 User-Agent，也**不等于 macOS Safari 或 iOS Safari**。
+- 复用多浏览器共享行为合同：旧库首个音频读取、墓碑删除、跨标签页读取快照与下载竞争、取消续传、书库界面、真实 PCM WAV 播放/暂停/恢复/完成、资源清理、删除通知与待处理打开请求、空间预估告警和错误恢复。所有场景使用浏览器真实数据持久化与媒体元素。
+- Linux 无实体音频设备，测试配置 PulseAudio 的独立 `module-null-sink` 作为系统输出设备；不会模拟 `HTMLMediaElement.play()` 或放宽时间推进断言。若 WebKit 报权限错误或不支持某 API，须记录并针对实际场景处理，不可因为 Chromium/Firefox 已绿而略过。
+- Chromium 独有的 BFCache 特殊启动与实际缓存准入测试不直接移植，WebKit 的真实前进后退缓存仍需要独立设计；Safari 的后台标签页、移动设备声音输出、用户激活策略及系统空间回收也不能由 Linux CI 代替。
+- 验收结论仅以 WebKit 工作流在最终 PR HEAD 的实际 CI 结果为准；提交测试文件本身不是验证成功。
+
+## v16：跨浏览器 IndexedDB 音频二进制存储（2026-10-11）
+
+- Playwright Linux WebKit 实际写入离线 PCM WAV 的首个 `Blob` 时，`books` + `clips` 事务收到 `abort`，底层原因 `UnknownError: Error preparing Blob/File data to be stored in object store`。此前单元与 Chromium/Firefox 回归均未暴露。此证据表明该 WebKit 构建不能可靠地把 `Blob` 直接作为 IndexedDB 对象存储值；**不能外推到所有 Safari 浏览器版本**。
+- 存储层引入 `cvr-audio-bytes-v1` 数据封装：新音频 `Blob` 的 `ArrayBuffer` 字节与 MIME 类型作为可结构化克隆值存入 IndexedDB；读取时恢复标准 `Blob`，对上层播放、SHA-256 校验、断点续传 API 保持不变。旧的直接 `Blob` 数据与非 Blob 测试记录仍可读取，不强制重写旧库，保留回滚兼容性。
+- `Blob.arrayBuffer()` 必须在启动 IndexedDB 事务**之前**等待完成；事务内所有权、下载 token、删除墓碑的再检查保留在一个读写事务中。不得在事务活动期间 `await`，否则会引入自动提交和跨标签页竞争。即使序列化期间用户删除了书籍，读写事务仍须拒绝已失效的媒体写入。
+- Node 回归覆盖新二进制封装的底层存储值、MIME 和字节往返，以及旧 `Blob` 读回；浏览器回归依然要求实际音频播放和下载、删除与跨标签页竞争通过。WebKit 专项 CI 结果须在最终 PR HEAD 完成后独立报告，不可因格式改动已提交就宣称通过。
+- Reader 静态资源与 Service Worker shell 升级至 v16。相较原本直接保存 Blob，本方法发生额外一次 ArrayBuffer 分配；大书的总存储容量、编码耗时与跨设备 WebKit 表现需要后续实测。
+
+### WebKit 的旧 Blob 测试夹具边界（2026-10-11）
+
+在 Linux Playwright WebKit 中，向“旧版数据库”直接人工插入原始 Blob 也会触发同样的 `UnknownError`；因此即使生产新写入已使用 ArrayBuffer，测试本身仍无法成功创建旧的原始 Blob 数据。Chromium 和 Firefox 继续验证原始旧 Blob 的首次迁移。WebKit 采用等价的二进制封装夹具验证书籍归属、首次读取、跨标签页墓碑拒绝与保留回滚数据库。旧库若已经保存二进制封装，读取时统一还原 Blob 后复制到现行存储；若 WebKit 环境中已存在的原始 Blob 可读，旧的 Blob 分支仍保留，但**尚无这条历史路径在 Linux WebKit 中成功创建和读取真实旧 Blob 的证据**。不得将替代夹具称为完全相同的旧格式兼容验收。
+
+### WebKit 同源存储通知不派发事件的回退机制（2026-10-11）
+
+- WebKit 中通过另一个同源标签页确认删除后，发件人的 `localStorage.setItem` 成功，接收方也读取到了同一 `book-deleted` 消息；但是原生 `storage` 监听实际未收到事件（捕获到的原始事件数组为空）。这属于该 Linux WebKit CI 的实测事件投递差异，不能简单归因于数据持久化失败。
+- 在 `BroadcastChannel` 不可用的回退分支中，保留原有 `storage` 事件回调，额外通过每 1000 毫秒查询对应 `localStorage` 消息值，并在 `focus` 和 `pageshow` 立即重新检查。监听开始时读取并记住当前值，不会因历史遗留的旧删除消息而重复广播；清理观察者时必须同时释放计时器与事件监听。支持 BroadcastChannel 的正常路径不启用轮询。
+- 浏览器后台可能限制计时器，因此不能承诺删除的毫秒级即时通知；恢复焦点或前进后退缓存页面返回可尽快同步。消息只用于 UI 失效，未改变原有依托 IndexedDB 的所有权/墓碑原子事务与数据删除；如果两种事件和 localStorage 都不可用，仍由页面恢复时的存储状态复核提供有限一致性保障。
+- Chromium/Firefox 原生 storage 通知继续使用同一测试，而 Linux WebKit 由低频轮询路径补足相同的最终观察语义。这不属于跨设备撤销机制。
