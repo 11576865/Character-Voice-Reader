@@ -45,7 +45,12 @@ def main():
                 check_cross_tab_new_download_supersedes_stale_writer(browser, origin)
                 check_cancel_keeps_verified_partial_audio_for_resume(browser, origin)
                 check_delete_reclaims_orphaned_manifest_clips(browser, origin)
-                check_clip_first_legacy_migration_is_tombstone_safe(browser, origin)
+                # This WebKit build cannot persist raw Blob fixtures in IDB.
+                # Exercise legacy owner migration with binary values instead;
+                # Chromium and Firefox retain the raw legacy Blob test.
+                check_clip_first_legacy_migration_is_tombstone_safe(
+                    browser, origin, binary_legacy_fixture=True
+                )
                 check_current_clip_owner_atomic_read_cross_tab(browser, origin)
                 check_offline_shelf_ui_without_service(browser, origin)
                 check_late_book_open_cannot_replace_newer_source(browser, origin)
