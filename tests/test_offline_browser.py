@@ -22,6 +22,15 @@ class QuietHandler(SimpleHTTPRequestHandler):
         # Serve the real app entry and asset contract without a CVS backend.
         # Existing storage-only tests continue using /web/js/offline.js.
         path = self.path.split("?", 1)[0]
+        if path == "/bfcache-probe":
+            body = b"<!doctype html><title>BFCache control</title><p>Control page</p>"
+            self.send_response(200)
+            self.send_header("Content-Type", "text/html; charset=utf-8")
+            self.send_header("Cache-Control", "public, max-age=120")
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+            return
         if path == "/reader-ui":
             self.path = "/web/index.html"
         elif path.startswith("/reader-assets/"):
@@ -1388,6 +1397,7 @@ def check_real_bfcache_navigation_and_offline_deletion(playwright, origin):
     """
     browser = playwright.chromium.launch(
         headless=True,
+        channel="chromium",  # Full Chromium new-headless, not Chromium Headless Shell.
         ignore_default_args=["--disable-back-forward-cache"],
         args=["--enable-features=BackForwardCache"],
     )
@@ -1397,6 +1407,32 @@ def check_real_bfcache_navigation_and_offline_deletion(playwright, origin):
     reader.on("pageerror", lambda error: errors.append("reader: " + str(error)))
     manager.on("pageerror", lambda error: errors.append("manager: " + str(error)))
     try:
+        # First prove this dedicated browser really admits a *plain* page
+        # into BFCache; otherwise a Reader failure cannot be attributed to
+        # our app's lifecycle code.
+        probe = context.new_page()
+        probe.goto(origin + "/bfcache-probe", wait_until="load")
+        probe.evaluate("""() => {
+          window.bfcacheControlToken = crypto.randomUUID();
+          window.bfcacheControlShows = [];
+          addEventListener("pageshow", e =>
+            window.bfcacheControlShows.push(e.persisted));
+        }""")
+        control_token = probe.evaluate("window.bfcacheControlToken")
+        probe.goto(origin + "/?bfcache-control-away=1", wait_until="load")
+        probe.go_back(wait_until="commit")
+        control = probe.evaluate("""() => ({
+          token: window.bfcacheControlToken || null,
+          shows: window.bfcacheControlShows || [],
+          notRestored: performance.getEntriesByType("navigation")[0]
+            ?.notRestoredReasons || null
+        })""")
+        assert control["token"] == control_token and True in control["shows"], (
+            "BFCache control page did not restore in this test browser: "
+            + repr(control)
+        )
+        probe.close()
+
         reader.goto(origin + "/reader-ui", wait_until="load")
         manager.goto(origin + "/reader-ui", wait_until="load")
         reader.get_by_text("暂无本机离线书籍", exact=False).wait_for()
