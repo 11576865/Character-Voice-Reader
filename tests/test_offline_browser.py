@@ -115,7 +115,7 @@ def check_late_result_after_cross_tab_delete(browser, origin):
           window.releaseSecond(audioBlob("second"));
           return await window.downloadOutcome;
         }""")
-        assert outcome == "error:AbortError", outcome
+        assert outcome.startswith("error:AbortError:"), outcome
         assert second.evaluate("""async () => {
           const library = newLibrary();
           return (await library.getBook("browser-delete")) === undefined
