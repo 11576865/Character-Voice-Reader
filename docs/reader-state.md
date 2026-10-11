@@ -209,3 +209,10 @@ finished
 - 在离开期间从另一个标签页提交 IndexedDB 删除：一组测试旧 `getBook()` 延迟结果被丢弃，恢复时重新读取已删除书籍并拒绝重新打开；另一组测试**已经打开的**离线书籍在 BFCache 恢复后执行持久化存在性检查并清空已删除正文。两次真实返回均需要缓存命中。
 - Chrome 可能因浏览器版本、无缓存资格的活动 API、服务工作线程或测试环境参数导致实际 BFCache 未命中；此时必须作为专项验收失败记录，并诊断 `PerformanceNavigationTiming.notRestoredReasons`（若浏览器支持），不能静默放宽为一般回退导航。代码逻辑测试与浏览器真正 BFCache 资格仍是两类独立证据。
 - 本专项测试仍是 Chromium headless 环境，不能代替 Android/iOS、Safari/Firefox 的移动/跨引擎验收。
+
+### 完成验证：完整 Chromium 的真实 BFCache 命中（2026-10-11）
+
+- 最初测试在 Playwright 默认 Chromium headless shell 中未命中 BFCache：历史返回创建新文档实例，`PerformanceNavigationTiming.notRestoredReasons` 为浏览器隐藏的 `masked` 原因。不能据此推断 Reader 代码本身存在 BFCache 缺陷。
+- 独立专项改为 `playwright.chromium.launch(headless=True, channel="chromium", ignore_default_args=["--disable-back-forward-cache"], args=["--enable-features=BackForwardCache"])`，以完整 Chromium 的新 headless 模式替代默认 Headless Shell，同时移除 Playwright 的显式禁用 BFCache 参数。
+- 在应用场景前添加**最小 HTML 对照页**，要求它先真实恢复 BFCache；Reader 测试再次强制检查文档身份令牌和原生 `pageshow.persisted === true`。在此配置下，对照页及 Reader 的等待中／已打开两类删除场景均通过 Chromium/IndexedDB CI。
+- 首轮失败不能报告为产品缺陷；最终证据是受控 CI 中的真实 Chromium BFCache 恢复，仍非 Safari/Firefox、Android/iOS 或系统低内存页面驱逐测试。
