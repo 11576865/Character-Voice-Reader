@@ -1425,16 +1425,40 @@ def check_cross_tab_deletion_storage_event_fallback(browser, origin):
         receiver.evaluate("""async () => {
           const { observeOfflineBookDeletions } = await import("/web/js/offline.js");
           window.deletionEvents = [];
+          window.rawStorageEvents = [];
+          window.addEventListener("storage", event => {
+            window.rawStorageEvents.push({
+              key: event.key, newValue: event.newValue
+            });
+          });
           window.closeObserver = observeOfflineBookDeletions(
             id => window.deletionEvents.push(id));
         }""")
-        deleter.evaluate("""async () => {
+        stored = deleter.evaluate("""async () => {
           const library = newLibrary();
           const id = "b-" + "0".repeat(24);
           await library.putBook({ id, title: "Fallback test" });
           await library.removeBook(id);
+          return {
+            deleted: (await library.getBook(id)) === undefined,
+            localStorageValue: localStorage.getItem("cvr.offline-library-deletion-event"),
+            broadcastChannel: typeof BroadcastChannel
+          };
         }""")
-        receiver.wait_for_function("""() => window.deletionEvents.length === 1""")
+        try:
+            receiver.wait_for_function("""() => window.deletionEvents.length === 1""",
+                                       timeout=7000)
+        except Exception as error:
+            info = receiver.evaluate("""() => ({
+              localStorageValue: localStorage.getItem("cvr.offline-library-deletion-event"),
+              rawStorageEvents: window.rawStorageEvents,
+              deletionEvents: window.deletionEvents,
+              broadcastChannel: typeof BroadcastChannel
+            })""")
+            raise AssertionError(
+                "Storage event fallback failed: sender=" + repr(stored)
+                + " receiver=" + repr(info)
+            ) from error
         assert receiver.evaluate("""() => window.deletionEvents[0] ===
           "b-" + "0".repeat(24)""")
         receiver.evaluate("window.closeObserver()")
