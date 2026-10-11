@@ -677,6 +677,13 @@ def check_real_offline_audio_playback(browser, origin):
           testAudio.dispatchEvent(new Event("error"));
           if (!errorMessage.includes("音频格式") ||
               errorMessage.includes("WAV 音频")) return false;
+          errorMessage = "";
+          Object.defineProperty(testAudio, "error", {
+            configurable: true, value: { code: 3, message: "OnMediaSinkAudioError" }
+          });
+          testAudio.dispatchEvent(new Event("error"));
+          if (!errorMessage.includes("音频输出设备") ||
+              errorMessage.includes("音频格式")) return false;
           // An empty source must not schedule another gratuitous media load.
           const blank = document.createElement("audio");
           let blankLoads = 0;
