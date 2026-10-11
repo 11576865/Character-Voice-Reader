@@ -25,4 +25,16 @@ jobs:
           python-version: '3.12'
       - run: python -m pip install playwright==1.56.0
       - run: python -m playwright install --with-deps firefox
+      # GitHub Linux runners have no default physical audio output. Firefox
+      # rejects otherwise valid decoded PCM WAV with OnMediaSinkAudioError
+      # if the browser cannot create an audio sink. Keep a real playback
+      # assertion by routing it to an isolated silent PulseAudio device.
+      - name: Provide a Firefox audio output sink
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y pulseaudio pulseaudio-utils
+          pulseaudio --start --exit-idle-time=-1
+          pactl load-module module-null-sink sink_name=cvr_ci format=s16le rate=48000 channels=2
+          pactl set-default-sink cvr_ci
+          pactl info
       - run: python tests/test_offline_firefox.py
