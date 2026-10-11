@@ -9,7 +9,10 @@ export class AudioPlayer {
       // active Blob URL alone is not proof that this event belongs to it.
       if (!this.objectUrl || !audioElement.error ||
           audioElement.currentSrc !== this.objectUrl) return;
-      onError?.(new Error("浏览器无法解码当前音频；请检查音频文件是否完整，以及浏览器是否支持该音频格式。"));
+      const sinkUnavailable = /OnMediaSinkAudioError/i.test(audioElement.error.message || "");
+      onError?.(new Error(sinkUnavailable
+        ? "音频已载入，但浏览器无法连接音频输出设备；请检查扬声器、耳机和系统音频设置"
+        : "浏览器无法解码当前音频；请检查音频文件是否完整，以及浏览器是否支持该音频格式"));
     });
     audioElement.addEventListener("timeupdate", () => onTimeUpdate?.(audioElement.currentTime));
   }
