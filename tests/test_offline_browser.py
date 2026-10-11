@@ -1462,6 +1462,15 @@ def check_cross_tab_deletion_storage_event_fallback(browser, origin):
         assert receiver.evaluate("""() => window.deletionEvents[0] ===
           "b-" + "0".repeat(24)""")
         receiver.evaluate("window.closeObserver()")
+        # A disposed observer must not receive later native storage events or
+        # polling updates, even when BroadcastChannel was unavailable.
+        deleter.evaluate("""async () => {
+          await newLibrary().removeBook("b-" + "1".repeat(24));
+        }""")
+        receiver.wait_for_timeout(1250)  # Exceeds the 1000 ms poll interval.
+        assert receiver.evaluate("window.deletionEvents.length") == 1, (
+            "Unsubscribed offline deletion observer must not keep polling"
+        )
     finally:
         context.close()
 
