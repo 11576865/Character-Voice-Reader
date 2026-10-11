@@ -1,6 +1,9 @@
-"""Chromium-backed offline storage lifecycle regressions.
+"""Real-browser offline storage and Reader lifecycle regression scenarios.
 
-This is intentionally separate from pytest's in-memory IndexedDB substitute.
+Chromium runs the full suite, including its dedicated real BFCache test.
+Firefox reuses the shared IndexedDB, media and UI scenarios through
+test_offline_firefox.py, but has its own browser installation and CI job.
+Both are separate from pytest's in-memory IndexedDB substitute.
 Run: python tests/test_offline_browser.py
 """
 
