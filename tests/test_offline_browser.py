@@ -82,10 +82,26 @@ def check_late_result_after_cross_tab_delete(browser, origin):
           window.downloadDiagnostic = {
             secure: window.isSecureContext,
             subtle: Boolean(window.crypto?.subtle),
-            randomUUID: Boolean(window.crypto?.randomUUID)
+            randomUUID: Boolean(window.crypto?.randomUUID),
+            phase: "begin"
+          };
+          const library = newLibrary();
+          const oldGetBook = library.getBook.bind(library);
+          library.getBook = async (...args) => {
+            window.downloadDiagnostic.phase = "getBook";
+            const result = await oldGetBook(...args);
+            window.downloadDiagnostic.phase = "getBook-done";
+            return result;
+          };
+          const oldGetClip = library.getClip.bind(library);
+          library.getClip = async (...args) => {
+            window.downloadDiagnostic.phase = "getClip";
+            const result = await oldGetClip(...args);
+            window.downloadDiagnostic.phase = "getClip-done";
+            return result;
           };
           const delayed = new Promise(resolve => { window.releaseSecond = resolve; });
-          window.downloadOutcome = newLibrary().download(
+          window.downloadOutcome = library.download(
             manifest("browser-delete", clips),
             async id => {
               if (id === "part-1") return audioBlob("first");
@@ -98,8 +114,18 @@ def check_late_result_after_cross_tab_delete(browser, origin):
               return result;
             });
         }""")
-        first.wait_for_function("""() =>
-          window.secondRequested === true || window.downloadOutcomeResolved !== null""")
+        try:
+            first.wait_for_function("""() =>
+              window.secondRequested === true ||
+              window.downloadOutcomeResolved !== null""", timeout=16000)
+        except Exception as error:
+            raise AssertionError(
+                "Download stalled before second clip: " +
+                repr(first.evaluate("""() => ({
+                  result: window.downloadOutcomeResolved,
+                  diagnostic: window.downloadDiagnostic
+                })"""))
+            ) from error
         assert first.evaluate("window.secondRequested === true"), (
             "Download did not reach second media request: "
             + repr(first.evaluate("""() => ({
