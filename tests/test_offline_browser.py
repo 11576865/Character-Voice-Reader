@@ -85,6 +85,21 @@ def check_late_result_after_cross_tab_delete(browser, origin):
             randomUUID: Boolean(window.crypto?.randomUUID),
             phase: "begin"
           };
+          window.downloadDiagnostic.transactions = [];
+          const nativeTransaction = IDBDatabase.prototype.transaction;
+          IDBDatabase.prototype.transaction = function(stores, mode, ...args) {
+            const tx = nativeTransaction.call(this, stores, mode, ...args);
+            const info = { db: this.name, stores: Array.from(
+              typeof stores === "string" ? [stores] : stores), mode, event: "started" };
+            window.downloadDiagnostic.transactions.push(info);
+            for (const event of ["complete", "abort", "error"]) {
+              tx.addEventListener(event, () => {
+                info.event = event;
+                if (tx.error) info.error = tx.error.name + ":" + tx.error.message;
+              });
+            }
+            return tx;
+          };
           const library = newLibrary();
           const oldGetBook = library.getBook.bind(library);
           library.getBook = async (...args) => {
@@ -104,9 +119,14 @@ def check_late_result_after_cross_tab_delete(browser, origin):
           window.downloadOutcome = library.download(
             manifest("browser-delete", clips),
             async id => {
+              window.downloadDiagnostic.phase = "fetchAudio-" + id;
               if (id === "part-1") return audioBlob("first");
               window.secondRequested = true;
               return delayed;  // Simulates a network request ignoring cancellation.
+            },
+            (completed, total) => {
+              window.downloadDiagnostic.progress = [completed, total];
+              window.downloadDiagnostic.phase = "progress-" + completed;
             }
           ).then(() => "completed", error => "error:" + error.name +
             ":" + error.message).then(result => {
