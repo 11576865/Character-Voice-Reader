@@ -254,3 +254,7 @@ finished
 - `Blob.arrayBuffer()` 必须在启动 IndexedDB 事务**之前**等待完成；事务内所有权、下载 token、删除墓碑的再检查保留在一个读写事务中。不得在事务活动期间 `await`，否则会引入自动提交和跨标签页竞争。即使序列化期间用户删除了书籍，读写事务仍须拒绝已失效的媒体写入。
 - Node 回归覆盖新二进制封装的底层存储值、MIME 和字节往返，以及旧 `Blob` 读回；浏览器回归依然要求实际音频播放和下载、删除与跨标签页竞争通过。WebKit 专项 CI 结果须在最终 PR HEAD 完成后独立报告，不可因格式改动已提交就宣称通过。
 - Reader 静态资源与 Service Worker shell 升级至 v16。相较原本直接保存 Blob，本方法发生额外一次 ArrayBuffer 分配；大书的总存储容量、编码耗时与跨设备 WebKit 表现需要后续实测。
+
+### WebKit 的旧 Blob 测试夹具边界（2026-10-11）
+
+在 Linux Playwright WebKit 中，向“旧版数据库”直接人工插入原始 Blob 也会触发同样的 `UnknownError`；因此即使生产新写入已使用 ArrayBuffer，测试本身仍无法成功创建旧的原始 Blob 数据。Chromium 和 Firefox 继续验证原始旧 Blob 的首次迁移。WebKit 采用等价的二进制封装夹具验证书籍归属、首次读取、跨标签页墓碑拒绝与保留回滚数据库。旧库若已经保存二进制封装，读取时统一还原 Blob 后复制到现行存储；若 WebKit 环境中已存在的原始 Blob 可读，旧的 Blob 分支仍保留，但**尚无这条历史路径在 Linux WebKit 中成功创建和读取真实旧 Blob 的证据**。不得将替代夹具称为完全相同的旧格式兼容验收。
