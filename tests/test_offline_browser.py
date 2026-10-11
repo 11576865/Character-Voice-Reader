@@ -1455,12 +1455,7 @@ def check_real_bfcache_navigation_and_offline_deletion(playwright, origin):
         ).get_by_role("button", name="打开阅读").click()
         reader.wait_for_function("window.pendingActualBFCacheRead === true")
 
-        def navigate_away_and_back(label):
-            reader.goto(origin + "/?bfcache-away=" + label, wait_until="load")
-            # The caller performs another-tab IndexedDB operations here.
-            return None
-
-        navigate_away_and_back("pending")
+        reader.goto(origin + "/?bfcache-away=pending", wait_until="load")
         manager.evaluate("""async () => {
           const { OfflineLibrary } = await import("/reader-assets/js/offline.js");
           await new OfflineLibrary().removeBook("b-" + "4".repeat(24));
@@ -1493,7 +1488,7 @@ def check_real_bfcache_navigation_and_offline_deletion(playwright, origin):
         reader.wait_for_function("""() => document.querySelector("#source")
           .textContent.includes("真实缓存已打开书籍")
           && !document.querySelector("#start").disabled""")
-        navigate_away_and_back("active")
+        reader.goto(origin + "/?bfcache-away=active", wait_until="load")
         manager.evaluate("""async () => {
           const { OfflineLibrary } = await import("/reader-assets/js/offline.js");
           await new OfflineLibrary().removeBook("b-" + "5".repeat(24));
