@@ -1147,7 +1147,13 @@ def check_clip_first_legacy_migration_is_tombstone_safe(browser, origin):
             const book = tx.objectStore("books").get(id);
             const clip = tx.objectStore("clips").get(id + ":part-1");
             let found = false;
-            clip.onsuccess = () => { found = clip.result?.size === 8; };
+            clip.onsuccess = () => {
+              const stored = clip.result;
+              found = stored?.size === 8 || (
+                stored?.__cvrClipFormat === "cvr-audio-bytes-v1"
+                && stored.bytes?.byteLength === 8
+              );
+            };
             tx.oncomplete = () => resolve(found && book.result?.id === id);
             tx.onerror = () => reject(tx.error);
           });
