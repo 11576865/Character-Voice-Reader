@@ -521,10 +521,30 @@ def check_real_offline_audio_playback(browser, origin):
         assert page.locator("#voice").evaluate("(node) => !node.value"), \
             "real cached audio must work without an online voice catalog"
         page.locator("#start").click()
-        page.wait_for_function("""() => {
-          const audio = document.querySelector("#audio");
-          return audio.currentTime > 0.12 && !audio.paused && audio.duration >= 1.0;
-        }""", timeout=7000)
+        try:
+            page.wait_for_function("""() => {
+              const audio = document.querySelector("#audio");
+              return audio.currentTime > 0.12 && !audio.paused && audio.duration >= 1.0;
+            }""", timeout=7000)
+        except Exception as error:
+            diagnostics = page.evaluate("""() => {
+              const audio = document.querySelector("#audio");
+              return {
+                status: document.querySelector("#status")?.textContent,
+                shelf: document.querySelector("#offlineLibraryStatus")?.textContent,
+                readyState: audio.readyState, networkState: audio.networkState,
+                error: audio.error ? { code: audio.error.code,
+                  message: audio.error.message } : null,
+                paused: audio.paused, currentTime: audio.currentTime,
+                duration: audio.duration, src: audio.getAttribute("src"),
+                startLabel: document.querySelector("#start")?.textContent,
+                startDisabled: document.querySelector("#start")?.disabled
+              };
+            }""")
+            raise AssertionError(
+                "Native browser offline WAV did not start playback: "
+                + repr(diagnostics) + " | pageerrors=" + repr(errors)
+            ) from error
         assert page.locator("#status").inner_text().startswith("正在播放"), \
             "Reader should report actual playback"
         page.locator("#pause").click()
