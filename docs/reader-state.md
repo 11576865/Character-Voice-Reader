@@ -246,3 +246,11 @@ finished
 - Linux 无实体音频设备，测试配置 PulseAudio 的独立 `module-null-sink` 作为系统输出设备；不会模拟 `HTMLMediaElement.play()` 或放宽时间推进断言。若 WebKit 报权限错误或不支持某 API，须记录并针对实际场景处理，不可因为 Chromium/Firefox 已绿而略过。
 - Chromium 独有的 BFCache 特殊启动与实际缓存准入测试不直接移植，WebKit 的真实前进后退缓存仍需要独立设计；Safari 的后台标签页、移动设备声音输出、用户激活策略及系统空间回收也不能由 Linux CI 代替。
 - 验收结论仅以 WebKit 工作流在最终 PR HEAD 的实际 CI 结果为准；提交测试文件本身不是验证成功。
+
+## v16：跨浏览器 IndexedDB 音频二进制存储（2026-10-11）
+
+- Playwright Linux WebKit 实际写入离线 PCM WAV 的首个 `Blob` 时，`books` + `clips` 事务收到 `abort`，底层原因 `UnknownError: Error preparing Blob/File data to be stored in object store`。此前单元与 Chromium/Firefox 回归均未暴露。此证据表明该 WebKit 构建不能可靠地把 `Blob` 直接作为 IndexedDB 对象存储值；**不能外推到所有 Safari 浏览器版本**。
+- 存储层引入 `cvr-audio-bytes-v1` 数据封装：新音频 `Blob` 的 `ArrayBuffer` 字节与 MIME 类型作为可结构化克隆值存入 IndexedDB；读取时恢复标准 `Blob`，对上层播放、SHA-256 校验、断点续传 API 保持不变。旧的直接 `Blob` 数据与非 Blob 测试记录仍可读取，不强制重写旧库，保留回滚兼容性。
+- `Blob.arrayBuffer()` 必须在启动 IndexedDB 事务**之前**等待完成；事务内所有权、下载 token、删除墓碑的再检查保留在一个读写事务中。不得在事务活动期间 `await`，否则会引入自动提交和跨标签页竞争。即使序列化期间用户删除了书籍，读写事务仍须拒绝已失效的媒体写入。
+- Node 回归覆盖新二进制封装的底层存储值、MIME 和字节往返，以及旧 `Blob` 读回；浏览器回归依然要求实际音频播放和下载、删除与跨标签页竞争通过。WebKit 专项 CI 结果须在最终 PR HEAD 完成后独立报告，不可因格式改动已提交就宣称通过。
+- Reader 静态资源与 Service Worker shell 升级至 v16。相较原本直接保存 Blob，本方法发生额外一次 ArrayBuffer 分配；大书的总存储容量、编码耗时与跨设备 WebKit 表现需要后续实测。
