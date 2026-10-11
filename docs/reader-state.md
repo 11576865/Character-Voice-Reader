@@ -223,3 +223,11 @@ finished
 - Firefox 复用真实浏览器的 IndexedDB、书籍删除墓碑、旧版惰性迁移、下载取消与续传、客户端离线书架、真实 PCM WAV 播放／暂停／恢复／音频资源释放、多标签页删除通知与异步打开请求失效、存储配额提示等生产断言，不以“页面加载成功”替代行为验收。每个场景以独立浏览器上下文隔离同源测试数据。
 - 原有 **Chromium 真 BFCache** 专项测试依赖其完整 Chromium headless 特殊启动设置，不直接混入 Firefox 基础覆盖。Firefox 的浏览器原生 BFCache 资格、Android/iOS 的后台冻结和 WebKit/Safari 的自动播放策略仍须另行验收。
 - 证据评级：自动化 CI 成功才能证明 Ubuntu headless Firefox 的这些具体场景通过；不能由 CI 安装步骤成功或测试代码存在推定任何实际通过。
+
+## v15：Firefox 媒体载入错误的跨引擎边界（2026-10-11）
+
+- 第一次 Ubuntu Playwright Firefox 142.0.1 CI 在执行真实 PCM WAV 播放时失败；原有 Chromium 回归和 Reader 单元测试通过。追加诊断后，Reader 误进入“浏览器无法解码当前音频”，音频源已被 `AudioPlayer.stop()` 清除，因此当时的音频元素处于 `readyState=0` 且没有 `src`。该记录只能直接证明 Firefox 在这组操作中触发了解码失败反馈，尚需独立区分真实解码失败与媒体事件归属竞态。
+- 原实现每次 `stop()` 都执行 `pause()` / 删除 src / `load()`，即使从未装载媒体也调用 `load()`，可能导致迟到的异步媒体事件。当新 Blob 已被设置时，仅用 `this.objectUrl` 非空推定事件属于当前音频，存在跨操作误归因风险。
+- 修订：从未设置媒体源时不触发无意义的重载；在 `error` 事件中要求 `HTMLMediaElement.error` 真实存在且 `currentSrc` 匹配播放器当前 Blob URL 才通过播放器回调报告解码失败。实际 `audio.play()` Promise 的失败仍独立由队列处理，不得吞掉真实解码或授权拒绝。
+- 浏览器测试保留真实 PCM WAV 播放、暂停／恢复、资源释放等断言，新增合成旧媒体错误必须被忽略、真实当前媒体错误继续获得通用格式诊断及从未绑定媒体时 `stop()` 不应调用 `load()` 的定点断言。Firefox 自动化 CI 成功之前不宣称该兼容性已经通过。
+- Reader/Service Worker 缓存更新至 v15。测试仅属于 Ubuntu headless Firefox 与 Chromium；不推断 Safari/WebKit 和实际 Android/iOS 音频权限行为。
