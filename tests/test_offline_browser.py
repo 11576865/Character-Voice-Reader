@@ -78,6 +78,12 @@ def check_late_result_after_cross_tab_delete(browser, origin):
         first.evaluate("""async () => {
           const clips = [await clip("part-1", "first"), await clip("part-2", "second")];
           window.secondRequested = false;
+          window.downloadOutcomeResolved = null;
+          window.downloadDiagnostic = {
+            secure: window.isSecureContext,
+            subtle: Boolean(window.crypto?.subtle),
+            randomUUID: Boolean(window.crypto?.randomUUID)
+          };
           const delayed = new Promise(resolve => { window.releaseSecond = resolve; });
           window.downloadOutcome = newLibrary().download(
             manifest("browser-delete", clips),
@@ -86,9 +92,21 @@ def check_late_result_after_cross_tab_delete(browser, origin):
               window.secondRequested = true;
               return delayed;  // Simulates a network request ignoring cancellation.
             }
-          ).then(() => "completed", error => "error:" + error.name);
+          ).then(() => "completed", error => "error:" + error.name +
+            ":" + error.message).then(result => {
+              window.downloadOutcomeResolved = result;
+              return result;
+            });
         }""")
-        first.wait_for_function("window.secondRequested === true")
+        first.wait_for_function("""() =>
+          window.secondRequested === true || window.downloadOutcomeResolved !== null""")
+        assert first.evaluate("window.secondRequested === true"), (
+            "Download did not reach second media request: "
+            + repr(first.evaluate("""() => ({
+              result: window.downloadOutcomeResolved,
+              diagnostic: window.downloadDiagnostic
+            })"""))
+        )
         assert second.evaluate("""async () => {
           await newLibrary().removeBook("browser-delete");
           return await newLibrary().getBook("browser-delete") === undefined;
