@@ -520,6 +520,55 @@ def check_real_offline_audio_playback(browser, origin):
           && document.querySelector("#source").textContent.includes("浏览器播放实测")""")
         assert page.locator("#voice").evaluate("(node) => !node.value"), \
             "real cached audio must work without an online voice catalog"
+        decode_control = page.evaluate("""async () => {
+          const { OfflineLibrary } = await import("/reader-assets/js/offline.js");
+          const blob = await new OfflineLibrary().getClip(
+            "b-" + "9".repeat(24), "real-wav-0");
+          const audio = document.createElement("audio");
+          audio.preload = "auto";
+          const url = URL.createObjectURL(blob);
+          const capability = audio.canPlayType(blob.type);
+          const result = await new Promise(resolve => {
+            const done = (state, details = {}) =>
+              resolve({ state, capability, bytes: blob.size, type: blob.type,
+                ...details });
+            audio.onloadedmetadata = () => done("decoded", {
+              duration: audio.duration, readyState: audio.readyState
+            });
+            audio.onerror = () => done("error", {
+              error: audio.error?.message, code: audio.error?.code,
+              currentSrc: audio.currentSrc
+            });
+            audio.src = url;
+            audio.load();
+            setTimeout(() => done("timeout", { networkState: audio.networkState }), 2500);
+          });
+          audio.removeAttribute("src"); audio.load();
+          URL.revokeObjectURL(url);
+          window.playbackMediaEvents = [];
+          document.querySelector("#audio").addEventListener("error", () => {
+            const element = document.querySelector("#audio");
+            window.playbackMediaEvents.push({
+              type: "error", code: element.error?.code,
+              message: element.error?.message,
+              currentSrc: element.currentSrc, src: element.getAttribute("src")
+            });
+          });
+          for (const kind of ["abort", "emptied", "loadedmetadata", "loadstart"]) {
+            document.querySelector("#audio").addEventListener(kind, () => {
+              const element = document.querySelector("#audio");
+              window.playbackMediaEvents.push({
+                type: kind, currentSrc: element.currentSrc,
+                src: element.getAttribute("src"), readyState: element.readyState
+              });
+            });
+          }
+          return result;
+        }""")
+        assert decode_control["state"] == "decoded" and decode_control["duration"] >= 1.0, (
+            "Browser cannot decode stored baseline WAV independently of Reader: "
+            + repr(decode_control)
+        )
         page.locator("#start").click()
         try:
             page.wait_for_function("""() => {
@@ -538,7 +587,9 @@ def check_real_offline_audio_playback(browser, origin):
                 paused: audio.paused, currentTime: audio.currentTime,
                 duration: audio.duration, src: audio.getAttribute("src"),
                 startLabel: document.querySelector("#start")?.textContent,
-                startDisabled: document.querySelector("#start")?.disabled
+                startDisabled: document.querySelector("#start")?.disabled,
+                mediaEvents: window.playbackMediaEvents || [],
+                mediaCapability: document.createElement("audio").canPlayType("audio/wav")
               };
             }""")
             raise AssertionError(
