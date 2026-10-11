@@ -1,6 +1,9 @@
-"""Chromium-backed offline storage lifecycle regressions.
+"""Real-browser offline storage and Reader lifecycle regression scenarios.
 
-This is intentionally separate from pytest's in-memory IndexedDB substitute.
+Chromium runs the full suite, including its dedicated real BFCache test.
+Firefox reuses the shared IndexedDB, media and UI scenarios through
+test_offline_firefox.py, but has its own browser installation and CI job.
+Both are separate from pytest's in-memory IndexedDB substitute.
 Run: python tests/test_offline_browser.py
 """
 
@@ -517,11 +520,85 @@ def check_real_offline_audio_playback(browser, origin):
           && document.querySelector("#source").textContent.includes("浏览器播放实测")""")
         assert page.locator("#voice").evaluate("(node) => !node.value"), \
             "real cached audio must work without an online voice catalog"
+        # Metadata decoding alone cannot prove that Linux Firefox can
+        # instantiate an audio sink. The real-playback assertions below
+        # remain mandatory even when this independent Blob control succeeds.
+        decode_control = page.evaluate("""async () => {
+          const { OfflineLibrary } = await import("/reader-assets/js/offline.js");
+          const blob = await new OfflineLibrary().getClip(
+            "b-" + "9".repeat(24), "real-wav-0");
+          const audio = document.createElement("audio");
+          audio.preload = "auto";
+          const url = URL.createObjectURL(blob);
+          const capability = audio.canPlayType(blob.type);
+          const result = await new Promise(resolve => {
+            const done = (state, details = {}) =>
+              resolve({ state, capability, bytes: blob.size, type: blob.type,
+                ...details });
+            audio.onloadedmetadata = () => done("decoded", {
+              duration: audio.duration, readyState: audio.readyState
+            });
+            audio.onerror = () => done("error", {
+              error: audio.error?.message, code: audio.error?.code,
+              currentSrc: audio.currentSrc
+            });
+            audio.src = url;
+            audio.load();
+            setTimeout(() => done("timeout", { networkState: audio.networkState }), 2500);
+          });
+          audio.removeAttribute("src"); audio.load();
+          URL.revokeObjectURL(url);
+          window.playbackMediaEvents = [];
+          document.querySelector("#audio").addEventListener("error", () => {
+            const element = document.querySelector("#audio");
+            window.playbackMediaEvents.push({
+              type: "error", code: element.error?.code,
+              message: element.error?.message,
+              currentSrc: element.currentSrc, src: element.getAttribute("src")
+            });
+          }, { capture: true }); // Run before Reader's player error handler.
+          for (const kind of ["abort", "emptied", "loadedmetadata", "loadstart"]) {
+            document.querySelector("#audio").addEventListener(kind, () => {
+              const element = document.querySelector("#audio");
+              window.playbackMediaEvents.push({
+                type: kind, currentSrc: element.currentSrc,
+                src: element.getAttribute("src"), readyState: element.readyState
+              });
+            });
+          }
+          return result;
+        }""")
+        assert decode_control["state"] == "decoded" and decode_control["duration"] >= 1.0, (
+            "Browser cannot decode stored baseline WAV independently of Reader: "
+            + repr(decode_control)
+        )
         page.locator("#start").click()
-        page.wait_for_function("""() => {
-          const audio = document.querySelector("#audio");
-          return audio.currentTime > 0.12 && !audio.paused && audio.duration >= 1.0;
-        }""", timeout=7000)
+        try:
+            page.wait_for_function("""() => {
+              const audio = document.querySelector("#audio");
+              return audio.currentTime > 0.12 && !audio.paused && audio.duration >= 1.0;
+            }""", timeout=7000)
+        except Exception as error:
+            diagnostics = page.evaluate("""() => {
+              const audio = document.querySelector("#audio");
+              return {
+                status: document.querySelector("#status")?.textContent,
+                shelf: document.querySelector("#offlineLibraryStatus")?.textContent,
+                readyState: audio.readyState, networkState: audio.networkState,
+                error: audio.error ? { code: audio.error.code,
+                  message: audio.error.message } : null,
+                paused: audio.paused, currentTime: audio.currentTime,
+                duration: audio.duration, src: audio.getAttribute("src"),
+                startLabel: document.querySelector("#start")?.textContent,
+                startDisabled: document.querySelector("#start")?.disabled,
+                mediaEvents: window.playbackMediaEvents || [],
+                mediaCapability: document.createElement("audio").canPlayType("audio/wav")
+              };
+            }""")
+            raise AssertionError(
+                "Native browser offline WAV did not start playback: "
+                + repr(diagnostics) + " | pageerrors=" + repr(errors)
+            ) from error
         assert page.locator("#status").inner_text().startswith("正在播放"), \
             "Reader should report actual playback"
         page.locator("#pause").click()
@@ -591,9 +668,31 @@ def check_real_offline_audio_playback(browser, origin):
             onError: error => { errorMessage = error.message; }
           });
           player.objectUrl = "blob:simulated-decode-error";
+          // A stale error with no MediaError must not be blamed on a new Blob.
           testAudio.dispatchEvent(new Event("error"));
-          return errorMessage.includes("音频格式")
-            && !errorMessage.includes("WAV 音频");
+          if (errorMessage) return false;
+          Object.defineProperty(testAudio, "error", {
+            configurable: true, value: { code: 4, message: "decode error" }
+          });
+          Object.defineProperty(testAudio, "currentSrc", {
+            configurable: true, value: player.objectUrl
+          });
+          testAudio.dispatchEvent(new Event("error"));
+          if (!errorMessage.includes("音频格式") ||
+              errorMessage.includes("WAV 音频")) return false;
+          errorMessage = "";
+          Object.defineProperty(testAudio, "error", {
+            configurable: true, value: { code: 3, message: "OnMediaSinkAudioError" }
+          });
+          testAudio.dispatchEvent(new Event("error"));
+          if (!errorMessage.includes("音频输出设备") ||
+              errorMessage.includes("音频格式")) return false;
+          // An empty source must not schedule another gratuitous media load.
+          const blank = document.createElement("audio");
+          let blankLoads = 0;
+          blank.load = () => { blankLoads++; };
+          new AudioPlayer(blank).stop();
+          return blankLoads === 0;
         }"""), "Decode diagnostics must not mislabel all formats as WAV"
         assert not errors, "Real audio playback raised JS errors: " + repr(errors)
     finally:

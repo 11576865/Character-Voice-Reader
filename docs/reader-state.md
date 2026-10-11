@@ -216,3 +216,25 @@ finished
 - 独立专项改为 `playwright.chromium.launch(headless=True, channel="chromium", ignore_default_args=["--disable-back-forward-cache"], args=["--enable-features=BackForwardCache"])`，以完整 Chromium 的新 headless 模式替代默认 Headless Shell，同时移除 Playwright 的显式禁用 BFCache 参数。
 - 在应用场景前添加**最小 HTML 对照页**，要求它先真实恢复 BFCache；Reader 测试再次强制检查文档身份令牌和原生 `pageshow.persisted === true`。在此配置下，对照页及 Reader 的等待中／已打开两类删除场景均通过 Chromium/IndexedDB CI。
 - 首轮失败不能报告为产品缺陷；最终证据是受控 CI 中的真实 Chromium BFCache 恢复，仍非 Safari/Firefox、Android/iOS 或系统低内存页面驱逐测试。
+
+## 跨引擎验证：Firefox 离线书库、媒体和多标签页（2026-10-11）
+
+- 新增独立 GitHub Actions 工作流 `Reader Firefox offline regressions`，在 Ubuntu runner 上安装 Playwright 1.56.0 的**真实 Firefox 引擎**，而不是把 Chromium 设置 User-Agent 冒充 Firefox。该工作流与原有的 Reader tests、Chromium IndexedDB 测试并行执行；涉及 `web/**` 或共享/Firefox 回归脚本的 PR 必须维护相应结果。
+- Firefox 复用真实浏览器的 IndexedDB、书籍删除墓碑、旧版惰性迁移、下载取消与续传、客户端离线书架、真实 PCM WAV 播放／暂停／恢复／音频资源释放、多标签页删除通知与异步打开请求失效、存储配额提示等生产断言，不以“页面加载成功”替代行为验收。每个场景以独立浏览器上下文隔离同源测试数据。
+- 原有 **Chromium 真 BFCache** 专项测试依赖其完整 Chromium headless 特殊启动设置，不直接混入 Firefox 基础覆盖。Firefox 的浏览器原生 BFCache 资格、Android/iOS 的后台冻结和 WebKit/Safari 的自动播放策略仍须另行验收。
+- 证据评级：自动化 CI 成功才能证明 Ubuntu headless Firefox 的这些具体场景通过；不能由 CI 安装步骤成功或测试代码存在推定任何实际通过。
+
+## v15：Firefox 媒体载入错误的跨引擎边界（2026-10-11）
+
+- 第一次 Ubuntu Playwright Firefox 142.0.1 CI 在执行真实 PCM WAV 播放时失败；原有 Chromium 回归和 Reader 单元测试通过。追加诊断后，Reader 误进入“浏览器无法解码当前音频”，音频源已被 `AudioPlayer.stop()` 清除，因此当时的音频元素处于 `readyState=0` 且没有 `src`。该记录只能直接证明 Firefox 在这组操作中触发了解码失败反馈，尚需独立区分真实解码失败与媒体事件归属竞态。
+- 原实现每次 `stop()` 都执行 `pause()` / 删除 src / `load()`，即使从未装载媒体也调用 `load()`，可能导致迟到的异步媒体事件。当新 Blob 已被设置时，仅用 `this.objectUrl` 非空推定事件属于当前音频，存在跨操作误归因风险。
+- 修订：从未设置媒体源时不触发无意义的重载；在 `error` 事件中要求 `HTMLMediaElement.error` 真实存在且 `currentSrc` 匹配播放器当前 Blob URL 才通过播放器回调报告解码失败。实际 `audio.play()` Promise 的失败仍独立由队列处理，不得吞掉真实解码或授权拒绝。
+- 浏览器测试保留真实 PCM WAV 播放、暂停／恢复、资源释放等断言，新增合成旧媒体错误必须被忽略、真实当前媒体错误继续获得通用格式诊断及从未绑定媒体时 `stop()` 不应调用 `load()` 的定点断言。Firefox 自动化 CI 成功之前不宣称该兼容性已经通过。
+- Reader/Service Worker 缓存更新至 v15。测试仅属于 Ubuntu headless Firefox 与 Chromium；不推断 Safari/WebKit 和实际 Android/iOS 音频权限行为。
+
+### Firefox 音频接收端故障定位与 CI 修复（2026-10-11）
+
+- 进一步在浏览器 `error` 事件**早于 Reader 清理动作**的捕获阶段记录原生错误：Firefox 142.0.1 返回 `MediaError.code=3` 且 `message="OnMediaSinkAudioError"`。与此同时，直接从 IndexedDB 获取相同 WAV Blob、独立放入 `audio` 元素可成功解析元数据。因此不能仅凭错误码将其误称为 WAV 编码损坏；直接原因是 headless Firefox 无法建立可用的系统音频输出端。
+- 在 Firefox CI 中显式启动 PulseAudio，并建立独立的 `module-null-sink` 空输出设备。这样仍通过真正的 HTMLAudioElement 驱动媒体时间、暂停、恢复、片段衔接与完成事件，音频输出无声路由，不是替换播放器或绕过 `play()` 断言。
+- 播放器进一步区分原生 `OnMediaSinkAudioError` 并显示“音频输出设备”恢复指引；普通格式损坏仍保持独立错误提示。两类有别的 MediaError 与迟到虚假媒体事件均新增真实浏览器内的定点断言。
+- 完整跨引擎自动化证据以最终 GitHub Actions 最新提交的三组结果为准。即使 Firefox 在此配置下通过，也不能声称物理声卡、耳机、蓝牙输出或 Safari/Android/iOS 自动播放行为通过实机验收。
