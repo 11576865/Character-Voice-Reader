@@ -520,6 +520,9 @@ def check_real_offline_audio_playback(browser, origin):
           && document.querySelector("#source").textContent.includes("浏览器播放实测")""")
         assert page.locator("#voice").evaluate("(node) => !node.value"), \
             "real cached audio must work without an online voice catalog"
+        # Metadata decoding alone cannot prove that Linux Firefox can
+        # instantiate an audio sink. The real-playback assertions below
+        # remain mandatory even when this independent Blob control succeeds.
         decode_control = page.evaluate("""async () => {
           const { OfflineLibrary } = await import("/reader-assets/js/offline.js");
           const blob = await new OfflineLibrary().getClip(
