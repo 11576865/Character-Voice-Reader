@@ -553,7 +553,7 @@ def check_real_offline_audio_playback(browser, origin):
               message: element.error?.message,
               currentSrc: element.currentSrc, src: element.getAttribute("src")
             });
-          });
+          }, { capture: true }); // Run before Reader's player error handler.
           for (const kind of ["abort", "emptied", "loadedmetadata", "loadstart"]) {
             document.querySelector("#audio").addEventListener(kind, () => {
               const element = document.querySelector("#audio");
