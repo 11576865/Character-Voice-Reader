@@ -201,3 +201,11 @@ finished
 - 在休眠和恢复之间发生的新的手动文本或其他来源选择会清除挂起的恢复意图，遵守“最新用户意图优先”，而不是被自动恢复的旧书覆盖。已打开的离线书籍仍由原有 `pageshow` 存活检查保护。
 - Chromium 回归通过显式触发 `PageTransitionEvent(pagehide/pageshow, persisted=true)` 模拟生命周期，延迟第一个 `getBook()`，在另一页面删除旧书，验证恢复后重新查询并拒绝迟到旧值；另覆盖未删除时可恢复，以及休眠期间主动切换文本后不得自动重新打开。
 - 证据边界：这里使用真实 Chromium + IndexedDB 和**合成 PageTransitionEvent** 测试 Reader 的生命周期处理代码，不等同于浏览器确实把页面放入 BFCache；真实 BFCache 驻留、浏览器事件调度、OS 休眠及 Safari/Firefox/移动端仍需分别验收。
+
+## 真实 BFCache 导航验收补充（2026-10-11）
+
+- PR #23 使用合成 `PageTransitionEvent` 触发 `pagehide/pageshow` 处理逻辑，不能证明浏览器真正将 Reader 页面驻留在 Back/Forward Cache 中。Playwright 标准 Chromium 启动参数还默认包含 `--disable-back-forward-cache`，常规 Chromium/IndexedDB 回归不能当作真实 BFCache 验收。
+- 本次增加**独立启动的 Chromium**：通过 `ignore_default_args=["--disable-back-forward-cache"]` 排除自动禁用选项，执行真实 `page.goto(离开页面)` + `page.go_back()` 导航，验证原 JavaScript 文档实例令牌保持不变、`pageshow.persisted === true`，不接受普通页面重新加载冒充缓存恢复。
+- 在离开期间从另一个标签页提交 IndexedDB 删除：一组测试旧 `getBook()` 延迟结果被丢弃，恢复时重新读取已删除书籍并拒绝重新打开；另一组测试**已经打开的**离线书籍在 BFCache 恢复后执行持久化存在性检查并清空已删除正文。两次真实返回均需要缓存命中。
+- Chrome 可能因浏览器版本、无缓存资格的活动 API、服务工作线程或测试环境参数导致实际 BFCache 未命中；此时必须作为专项验收失败记录，并诊断 `PerformanceNavigationTiming.notRestoredReasons`（若浏览器支持），不能静默放宽为一般回退导航。代码逻辑测试与浏览器真正 BFCache 资格仍是两类独立证据。
+- 本专项测试仍是 Chromium headless 环境，不能代替 Android/iOS、Safari/Firefox 的移动/跨引擎验收。
