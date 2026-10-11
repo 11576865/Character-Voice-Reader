@@ -129,6 +129,30 @@ async function restoreLegacyBook(book) {
 
 const clipKey = (bookId, segmentId) => `${bookId}:${segmentId}`;
 
+// Linux WebKit's IndexedDB backend may abort when serializing a Blob directly
+// ("Error preparing Blob/File data to be stored in object store"). Store its
+// bytes as an ArrayBuffer structured-clone instead. Existing raw Blob records
+// and non-Blob fixtures remain readable without a destructive migration.
+const CLIP_BYTES_FORMAT = "cvr-audio-bytes-v1";
+async function prepareStoredClip(audio) {
+  if (typeof Blob !== "undefined" && audio instanceof Blob) {
+    return {
+      __cvrClipFormat: CLIP_BYTES_FORMAT,
+      type: audio.type,
+      bytes: await audio.arrayBuffer()
+    };
+  }
+  return audio;
+}
+
+function decodeStoredClip(stored) {
+  if (stored?.__cvrClipFormat === CLIP_BYTES_FORMAT &&
+      stored.bytes instanceof ArrayBuffer) {
+    return new Blob([stored.bytes], { type: stored.type || "" });
+  }
+  return stored;
+}
+
 // Read authorization (live owner) and the media blob from one IndexedDB
 // snapshot. A separate books transaction followed by a clips transaction
 // could observe different revisions when another tab deletes the book.
@@ -166,6 +190,10 @@ function assertActive(signal) {
 // token. A delete, newer download, or another tab can invalidate an older run.
 async function ownedDownloadWrite(bookId, token, { book, clipId, audio, signal } = {}) {
   assertActive(signal);
+  // Await byte materialization before creating the IndexedDB transaction;
+  // awaiting within an active transaction would let it auto-commit.
+  const storedAudio = clipId != null ? await prepareStoredClip(audio) : undefined;
+  assertActive(signal);
   const db = await openDatabase();
   return new Promise((resolve, reject) => {
     const tx = db.transaction([BOOKS, CLIPS], "readwrite");
@@ -177,7 +205,7 @@ async function ownedDownloadWrite(bookId, token, { book, clipId, audio, signal }
       const current = request.result;
       if (signal?.aborted || !current || isDeletedBook(current) ||
           current.__cvrDownloadToken !== token) return;
-      if (clipId != null) clips.put(audio, clipKey(bookId, clipId));
+      if (clipId != null) clips.put(storedAudio, clipKey(bookId, clipId));
       books.put(book, bookId);
       written = true;
     };
@@ -215,6 +243,7 @@ async function beginDownload(book, manifest, token, previous, signal) {
 }
 
 async function writeClipIfLive(bookId, segmentId, audio) {
+  const storedAudio = await prepareStoredClip(audio);
   const db = await openDatabase();
   return new Promise((resolve, reject) => {
     const tx = db.transaction([BOOKS, CLIPS], "readwrite");
@@ -223,7 +252,7 @@ async function writeClipIfLive(bookId, segmentId, audio) {
     let allowed = false;
     request.onsuccess = () => {
       if (request.result && !isDeletedBook(request.result)) {
-        tx.objectStore(CLIPS).put(audio, clipKey(bookId, segmentId));
+        tx.objectStore(CLIPS).put(storedAudio, clipKey(bookId, segmentId));
         allowed = true;
       }
     };
@@ -253,7 +282,7 @@ export class OfflineLibrary {
       ({ owner, clip } = await readCurrentClipWithOwner(bookId, segmentId));
       if (!owner || isDeletedBook(owner)) return undefined;
     }
-    if (clip !== undefined) return clip;
+    if (clip !== undefined) return decodeStoredClip(clip);
 
     const legacy = await transaction(CLIPS, "readonly",
       store => store.get(clipKey(bookId, segmentId)), { legacy: true });
