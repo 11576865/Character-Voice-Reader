@@ -216,3 +216,10 @@ finished
 - 独立专项改为 `playwright.chromium.launch(headless=True, channel="chromium", ignore_default_args=["--disable-back-forward-cache"], args=["--enable-features=BackForwardCache"])`，以完整 Chromium 的新 headless 模式替代默认 Headless Shell，同时移除 Playwright 的显式禁用 BFCache 参数。
 - 在应用场景前添加**最小 HTML 对照页**，要求它先真实恢复 BFCache；Reader 测试再次强制检查文档身份令牌和原生 `pageshow.persisted === true`。在此配置下，对照页及 Reader 的等待中／已打开两类删除场景均通过 Chromium/IndexedDB CI。
 - 首轮失败不能报告为产品缺陷；最终证据是受控 CI 中的真实 Chromium BFCache 恢复，仍非 Safari/Firefox、Android/iOS 或系统低内存页面驱逐测试。
+
+## 跨引擎验证：Firefox 离线书库、媒体和多标签页（2026-10-11）
+
+- 新增独立 GitHub Actions 工作流 `Reader Firefox offline regressions`，在 Ubuntu runner 上安装 Playwright 1.56.0 的**真实 Firefox 引擎**，而不是把 Chromium 设置 User-Agent 冒充 Firefox。该工作流与原有的 Reader tests、Chromium IndexedDB 测试并行执行；涉及 `web/**` 或共享/Firefox 回归脚本的 PR 必须维护相应结果。
+- Firefox 复用真实浏览器的 IndexedDB、书籍删除墓碑、旧版惰性迁移、下载取消与续传、客户端离线书架、真实 PCM WAV 播放／暂停／恢复／音频资源释放、多标签页删除通知与异步打开请求失效、存储配额提示等生产断言，不以“页面加载成功”替代行为验收。每个场景以独立浏览器上下文隔离同源测试数据。
+- 原有 **Chromium 真 BFCache** 专项测试依赖其完整 Chromium headless 特殊启动设置，不直接混入 Firefox 基础覆盖。Firefox 的浏览器原生 BFCache 资格、Android/iOS 的后台冻结和 WebKit/Safari 的自动播放策略仍须另行验收。
+- 证据评级：自动化 CI 成功才能证明 Ubuntu headless Firefox 的这些具体场景通过；不能由 CI 安装步骤成功或测试代码存在推定任何实际通过。
