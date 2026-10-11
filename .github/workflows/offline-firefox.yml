@@ -1,0 +1,28 @@
+name: Reader Firefox offline regressions
+
+on:
+  push:
+    paths:
+      - 'web/**'
+      - 'tests/test_offline_browser.py'
+      - 'tests/test_offline_firefox.py'
+      - '.github/workflows/offline-firefox.yml'
+  pull_request:
+    paths:
+      - 'web/**'
+      - 'tests/test_offline_browser.py'
+      - 'tests/test_offline_firefox.py'
+      - '.github/workflows/offline-firefox.yml'
+
+jobs:
+  firefox-offline:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - run: python -m pip install playwright==1.56.0
+      - run: python -m playwright install --with-deps firefox
+      - run: python tests/test_offline_firefox.py
