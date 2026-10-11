@@ -289,7 +289,8 @@ export class OfflineLibrary {
     if (legacy !== undefined) {
       // Its own readwrite transaction verifies the owner again: a delete
       // occurring during legacy I/O may not revive the removed audio.
-      return (await writeClipIfLive(bookId, segmentId, legacy)) ? legacy : undefined;
+      const restored = decodeStoredClip(legacy);
+      return (await writeClipIfLive(bookId, segmentId, restored)) ? restored : undefined;
     }
     return undefined;
   }
