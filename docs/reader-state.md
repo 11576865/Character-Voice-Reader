@@ -231,3 +231,10 @@ finished
 - 修订：从未设置媒体源时不触发无意义的重载；在 `error` 事件中要求 `HTMLMediaElement.error` 真实存在且 `currentSrc` 匹配播放器当前 Blob URL 才通过播放器回调报告解码失败。实际 `audio.play()` Promise 的失败仍独立由队列处理，不得吞掉真实解码或授权拒绝。
 - 浏览器测试保留真实 PCM WAV 播放、暂停／恢复、资源释放等断言，新增合成旧媒体错误必须被忽略、真实当前媒体错误继续获得通用格式诊断及从未绑定媒体时 `stop()` 不应调用 `load()` 的定点断言。Firefox 自动化 CI 成功之前不宣称该兼容性已经通过。
 - Reader/Service Worker 缓存更新至 v15。测试仅属于 Ubuntu headless Firefox 与 Chromium；不推断 Safari/WebKit 和实际 Android/iOS 音频权限行为。
+
+### Firefox 音频接收端故障定位与 CI 修复（2026-10-11）
+
+- 进一步在浏览器 `error` 事件**早于 Reader 清理动作**的捕获阶段记录原生错误：Firefox 142.0.1 返回 `MediaError.code=3` 且 `message="OnMediaSinkAudioError"`。与此同时，直接从 IndexedDB 获取相同 WAV Blob、独立放入 `audio` 元素可成功解析元数据。因此不能仅凭错误码将其误称为 WAV 编码损坏；直接原因是 headless Firefox 无法建立可用的系统音频输出端。
+- 在 Firefox CI 中显式启动 PulseAudio，并建立独立的 `module-null-sink` 空输出设备。这样仍通过真正的 HTMLAudioElement 驱动媒体时间、暂停、恢复、片段衔接与完成事件，音频输出无声路由，不是替换播放器或绕过 `play()` 断言。
+- 播放器进一步区分原生 `OnMediaSinkAudioError` 并显示“音频输出设备”恢复指引；普通格式损坏仍保持独立错误提示。两类有别的 MediaError 与迟到虚假媒体事件均新增真实浏览器内的定点断言。
+- 完整跨引擎自动化证据以最终 GitHub Actions 最新提交的三组结果为准。即使 Firefox 在此配置下通过，也不能声称物理声卡、耳机、蓝牙输出或 Safari/Android/iOS 自动播放行为通过实机验收。
