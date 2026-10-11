@@ -5,7 +5,11 @@ export class AudioPlayer {
     this.pendingSeek = null;
     audioElement.addEventListener("ended", () => onEnded?.());
     audioElement.addEventListener("error", () => {
-      if (this.objectUrl) onError?.(new Error("浏览器无法解码当前音频；请检查音频文件是否完整，以及浏览器是否支持该音频格式。"));
+      // load() / removal of a previous src may dispatch delayed errors. An
+      // active Blob URL alone is not proof that this event belongs to it.
+      if (!this.objectUrl || !audioElement.error ||
+          audioElement.currentSrc !== this.objectUrl) return;
+      onError?.(new Error("浏览器无法解码当前音频；请检查音频文件是否完整，以及浏览器是否支持该音频格式。"));
     });
     audioElement.addEventListener("timeupdate", () => onTimeUpdate?.(audioElement.currentTime));
   }
@@ -45,10 +49,13 @@ export class AudioPlayer {
     if (this.pendingSeek) this.audio.removeEventListener("loadedmetadata", this.pendingSeek);
     this.pendingSeek = null;
     const oldUrl = this.objectUrl;
+    const hadSource = Boolean(oldUrl || this.audio.getAttribute("src"));
     this.objectUrl = null;
     this.audio.pause();
     this.audio.removeAttribute("src");
-    this.audio.load();
+    // A no-op reset on a never-used audio element can produce a later
+    // error event on Firefox after the next source has been attached.
+    if (hadSource) this.audio.load();
     if (oldUrl) URL.revokeObjectURL(oldUrl);
   }
 }
