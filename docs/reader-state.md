@@ -238,3 +238,11 @@ finished
 - 在 Firefox CI 中显式启动 PulseAudio，并建立独立的 `module-null-sink` 空输出设备。这样仍通过真正的 HTMLAudioElement 驱动媒体时间、暂停、恢复、片段衔接与完成事件，音频输出无声路由，不是替换播放器或绕过 `play()` 断言。
 - 播放器进一步区分原生 `OnMediaSinkAudioError` 并显示“音频输出设备”恢复指引；普通格式损坏仍保持独立错误提示。两类有别的 MediaError 与迟到虚假媒体事件均新增真实浏览器内的定点断言。
 - 完整跨引擎自动化证据以最终 GitHub Actions 最新提交的三组结果为准。即使 Firefox 在此配置下通过，也不能声称物理声卡、耳机、蓝牙输出或 Safari/Android/iOS 自动播放行为通过实机验收。
+
+## WebKit 跨引擎离线回归（2026-10-11）
+
+- 新增单独的 `Reader WebKit offline regressions` GitHub Actions 工作流，以 Playwright 1.56.0 的 **Linux WebKit** 浏览器引擎执行真实 IndexedDB/HTMLAudioElement 行为验证，并保留现有 Chromium 和 Firefox 的独立 CI。测试并非简单更换 User-Agent，也**不等于 macOS Safari 或 iOS Safari**。
+- 复用多浏览器共享行为合同：旧库首个音频读取、墓碑删除、跨标签页读取快照与下载竞争、取消续传、书库界面、真实 PCM WAV 播放/暂停/恢复/完成、资源清理、删除通知与待处理打开请求、空间预估告警和错误恢复。所有场景使用浏览器真实数据持久化与媒体元素。
+- Linux 无实体音频设备，测试配置 PulseAudio 的独立 `module-null-sink` 作为系统输出设备；不会模拟 `HTMLMediaElement.play()` 或放宽时间推进断言。若 WebKit 报权限错误或不支持某 API，须记录并针对实际场景处理，不可因为 Chromium/Firefox 已绿而略过。
+- Chromium 独有的 BFCache 特殊启动与实际缓存准入测试不直接移植，WebKit 的真实前进后退缓存仍需要独立设计；Safari 的后台标签页、移动设备声音输出、用户激活策略及系统空间回收也不能由 Linux CI 代替。
+- 验收结论仅以 WebKit 工作流在最终 PR HEAD 的实际 CI 结果为准；提交测试文件本身不是验证成功。
