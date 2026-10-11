@@ -1,8 +1,9 @@
 """Real-browser offline storage and Reader lifecycle regression scenarios.
 
 Chromium runs the full suite, including its dedicated real BFCache test.
-Firefox reuses the shared IndexedDB, media and UI scenarios through
-test_offline_firefox.py, but has its own browser installation and CI job.
+Firefox and WebKit reuse the shared IndexedDB, media and UI scenarios
+through test_offline_firefox.py and test_offline_webkit.py, each with its own
+browser engine, audio-output setup and independent CI job.
 Both are separate from pytest's in-memory IndexedDB substitute.
 Run: python tests/test_offline_browser.py
 """
