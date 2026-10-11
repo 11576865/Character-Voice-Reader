@@ -46,15 +46,37 @@ export function observeOfflineBookDeletions(onDeleted) {
     } catch (_) { /* Fall back to the cross-tab storage event. */ }
   }
   if (typeof globalThis.addEventListener === "function") {
-    const listener = event => {
-      if (event.key !== DELETION_STORAGE_KEY || !event.newValue) return;
-      try {
-        const message = JSON.parse(event.newValue);
-        if (validDeletionEvent(message)) onDeleted(message.bookId);
-      } catch (_) { /* Ignore malformed or unrelated storage events. */ }
+    // Some WebKit contexts share localStorage but do not deliver a cross-tab
+    // storage event. The persisted nonce also allows low-frequency polling.
+    const currentValue = () => {
+      try { return globalThis.localStorage?.getItem(DELETION_STORAGE_KEY) || null; }
+      catch (_) { return null; }
     };
+    let lastValue = currentValue();
+    const processValue = value => {
+      if (!value || value === lastValue) return;
+      lastValue = value;
+      try {
+        const message = JSON.parse(value);
+        if (validDeletionEvent(message)) onDeleted(message.bookId);
+      } catch (_) { /* Ignore malformed or unrelated storage values. */ }
+    };
+    const listener = event => {
+      if (event.key === DELETION_STORAGE_KEY) processValue(event.newValue);
+    };
+    const check = () => processValue(currentValue());
     globalThis.addEventListener("storage", listener);
-    return () => globalThis.removeEventListener("storage", listener);
+    globalThis.addEventListener("focus", check);
+    globalThis.addEventListener("pageshow", check);
+    // Fallback only: BroadcastChannel users never allocate a poll timer.
+    // A hidden tab may throttle this timer; focus/pageshow will reconcile.
+    const interval = globalThis.setInterval?.(check, 1000);
+    return () => {
+      globalThis.removeEventListener("storage", listener);
+      globalThis.removeEventListener("focus", check);
+      globalThis.removeEventListener("pageshow", check);
+      if (interval !== undefined) globalThis.clearInterval?.(interval);
+    };
   }
   return () => {};
 }
