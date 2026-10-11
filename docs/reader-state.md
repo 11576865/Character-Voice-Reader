@@ -258,3 +258,10 @@ finished
 ### WebKit 的旧 Blob 测试夹具边界（2026-10-11）
 
 在 Linux Playwright WebKit 中，向“旧版数据库”直接人工插入原始 Blob 也会触发同样的 `UnknownError`；因此即使生产新写入已使用 ArrayBuffer，测试本身仍无法成功创建旧的原始 Blob 数据。Chromium 和 Firefox 继续验证原始旧 Blob 的首次迁移。WebKit 采用等价的二进制封装夹具验证书籍归属、首次读取、跨标签页墓碑拒绝与保留回滚数据库。旧库若已经保存二进制封装，读取时统一还原 Blob 后复制到现行存储；若 WebKit 环境中已存在的原始 Blob 可读，旧的 Blob 分支仍保留，但**尚无这条历史路径在 Linux WebKit 中成功创建和读取真实旧 Blob 的证据**。不得将替代夹具称为完全相同的旧格式兼容验收。
+
+### WebKit 同源存储通知不派发事件的回退机制（2026-10-11）
+
+- WebKit 中通过另一个同源标签页确认删除后，发件人的 `localStorage.setItem` 成功，接收方也读取到了同一 `book-deleted` 消息；但是原生 `storage` 监听实际未收到事件（捕获到的原始事件数组为空）。这属于该 Linux WebKit CI 的实测事件投递差异，不能简单归因于数据持久化失败。
+- 在 `BroadcastChannel` 不可用的回退分支中，保留原有 `storage` 事件回调，额外通过每 1000 毫秒查询对应 `localStorage` 消息值，并在 `focus` 和 `pageshow` 立即重新检查。监听开始时读取并记住当前值，不会因历史遗留的旧删除消息而重复广播；清理观察者时必须同时释放计时器与事件监听。支持 BroadcastChannel 的正常路径不启用轮询。
+- 浏览器后台可能限制计时器，因此不能承诺删除的毫秒级即时通知；恢复焦点或前进后退缓存页面返回可尽快同步。消息只用于 UI 失效，未改变原有依托 IndexedDB 的所有权/墓碑原子事务与数据删除；如果两种事件和 localStorage 都不可用，仍由页面恢复时的存储状态复核提供有限一致性保障。
+- Chromium/Firefox 原生 storage 通知继续使用同一测试，而 Linux WebKit 由低频轮询路径补足相同的最终观察语义。这不属于跨设备撤销机制。
