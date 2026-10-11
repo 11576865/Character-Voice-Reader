@@ -1095,14 +1095,16 @@ def check_quota_estimate_is_advisory_and_recovery_is_actionable(browser, origin)
 
 
 
-def check_clip_first_legacy_migration_is_tombstone_safe(browser, origin):
-    """A legacy clip is readable even if the legacy book has never been listed."""
+def check_clip_first_legacy_migration_is_tombstone_safe(
+    browser, origin, *, binary_legacy_fixture=False
+):
+    """Old raw Blobs or binary fixtures migrate only with a live owning book."""
     context = browser.new_context()
     first, second = context.new_page(), context.new_page()
     try:
         prepare(first, origin)
         prepare(second, origin)
-        first.evaluate("""async () => {
+        first.evaluate("""async (binaryFixture) => {
           const db = await new Promise((resolve, reject) => {
             const request = indexedDB.open("cvs-offline-library", 1);
             request.onupgradeneeded = () => {
@@ -1124,14 +1126,21 @@ def check_clip_first_legacy_migration_is_tombstone_safe(browser, origin):
               id: other, title: "Delete before clip read",
               manifest: { clips: [{ segmentId: "part-1" }] }
             }, other);
-            tx.objectStore("clips").put(audioBlob("historic"), book + ":part-1");
-            tx.objectStore("clips").put(audioBlob("deleted"), other + ":part-1");
+            const encode = text => binaryFixture
+              ? {
+                  __cvrClipFormat: "cvr-audio-bytes-v1",
+                  type: "audio/mpeg",
+                  bytes: new TextEncoder().encode(text).buffer
+                }
+              : audioBlob(text);
+            tx.objectStore("clips").put(encode("historic"), book + ":part-1");
+            tx.objectStore("clips").put(encode("deleted"), other + ":part-1");
             tx.oncomplete = resolve;
             tx.onerror = () => reject(tx.error);
             tx.onabort = () => reject(tx.error);
           });
           db.close();
-        }""")
+        }""", binary_legacy_fixture)
         assert second.evaluate("""async () => {
           const id = "b-" + "e".repeat(24);
           const library = newLibrary();
