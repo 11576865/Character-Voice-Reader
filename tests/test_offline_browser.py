@@ -614,9 +614,24 @@ def check_real_offline_audio_playback(browser, origin):
             onError: error => { errorMessage = error.message; }
           });
           player.objectUrl = "blob:simulated-decode-error";
+          // A stale error with no MediaError must not be blamed on a new Blob.
           testAudio.dispatchEvent(new Event("error"));
-          return errorMessage.includes("音频格式")
-            && !errorMessage.includes("WAV 音频");
+          if (errorMessage) return false;
+          Object.defineProperty(testAudio, "error", {
+            configurable: true, value: { code: 4, message: "decode error" }
+          });
+          Object.defineProperty(testAudio, "currentSrc", {
+            configurable: true, value: player.objectUrl
+          });
+          testAudio.dispatchEvent(new Event("error"));
+          if (!errorMessage.includes("音频格式") ||
+              errorMessage.includes("WAV 音频")) return false;
+          // An empty source must not schedule another gratuitous media load.
+          const blank = document.createElement("audio");
+          let blankLoads = 0;
+          blank.load = () => { blankLoads++; };
+          new AudioPlayer(blank).stop();
+          return blankLoads === 0;
         }"""), "Decode diagnostics must not mislabel all formats as WAV"
         assert not errors, "Real audio playback raised JS errors: " + repr(errors)
     finally:
