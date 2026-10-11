@@ -22,6 +22,15 @@ class QuietHandler(SimpleHTTPRequestHandler):
         # Serve the real app entry and asset contract without a CVS backend.
         # Existing storage-only tests continue using /web/js/offline.js.
         path = self.path.split("?", 1)[0]
+        if path == "/bfcache-probe":
+            body = b"<!doctype html><title>BFCache control</title><p>Control page</p>"
+            self.send_response(200)
+            self.send_header("Content-Type", "text/html; charset=utf-8")
+            self.send_header("Cache-Control", "public, max-age=120")
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+            return
         if path == "/reader-ui":
             self.path = "/web/index.html"
         elif path.startswith("/reader-assets/"):
@@ -1378,6 +1387,166 @@ def check_pending_offline_open_is_revalidated_after_pagehide(browser, origin):
         context.close()
 
 
+
+def check_real_bfcache_navigation_and_offline_deletion(playwright, origin):
+    """Exercise real Back/Forward Cache admission, not synthetic lifecycle events.
+
+    Playwright's regular Chromium launch intentionally disables BFCache; this
+    isolated browser removes that default flag. A test only passes if an actual
+    history Back reuses the same JS realm and fires pageshow.persisted=true.
+    """
+    browser = playwright.chromium.launch(
+        headless=True,
+        channel="chromium",  # Full Chromium new-headless, not Chromium Headless Shell.
+        ignore_default_args=["--disable-back-forward-cache"],
+        args=["--enable-features=BackForwardCache"],
+    )
+    context = browser.new_context(viewport={"width": 390, "height": 780})
+    reader, manager = context.new_page(), context.new_page()
+    errors = []
+    reader.on("pageerror", lambda error: errors.append("reader: " + str(error)))
+    manager.on("pageerror", lambda error: errors.append("manager: " + str(error)))
+    try:
+        # First prove this dedicated browser really admits a *plain* page
+        # into BFCache; otherwise a Reader failure cannot be attributed to
+        # our app's lifecycle code.
+        probe = context.new_page()
+        probe.goto(origin + "/bfcache-probe", wait_until="load")
+        probe.evaluate("""() => {
+          window.bfcacheControlToken = crypto.randomUUID();
+          window.bfcacheControlShows = [];
+          addEventListener("pageshow", e =>
+            window.bfcacheControlShows.push(e.persisted));
+        }""")
+        control_token = probe.evaluate("window.bfcacheControlToken")
+        probe.goto(origin + "/?bfcache-control-away=1", wait_until="load")
+        probe.go_back(wait_until="commit")
+        control = probe.evaluate("""() => ({
+          token: window.bfcacheControlToken || null,
+          shows: window.bfcacheControlShows || [],
+          notRestored: performance.getEntriesByType("navigation")[0]
+            ?.notRestoredReasons || null
+        })""")
+        assert control["token"] == control_token and True in control["shows"], (
+            "BFCache control page did not restore in this test browser: "
+            + repr(control)
+        )
+        probe.close()
+
+        reader.goto(origin + "/reader-ui", wait_until="load")
+        manager.goto(origin + "/reader-ui", wait_until="load")
+        reader.get_by_text("暂无本机离线书籍", exact=False).wait_for()
+        manager.get_by_text("暂无本机离线书籍", exact=False).wait_for()
+        reader.evaluate("""async () => {
+          const { OfflineLibrary } = await import("/reader-assets/js/offline.js");
+          const { segmentDocument } = await import("/reader-assets/js/segmenter.js");
+          const library = new OfflineLibrary();
+          for (const [suffix, title] of [
+            ["4", "真实缓存未完成打开"], ["5", "真实缓存已打开书籍"]
+          ]) {
+            const id = "b-" + suffix.repeat(24);
+            const document = { title, chapters: [{
+              title: "正文", paragraphs: ["仅属于" + title + "的正文。"]
+            }] };
+            await library.putBook({
+              id, title, kind: "epub", document,
+              segments: segmentDocument(document).map((part, index) => ({
+                ...part, id: suffix + "-real-bfcache-" + index
+              })), ready: false
+            });
+          }
+          window.actualBFCacheToken = crypto.randomUUID();
+          window.actualBFCacheEvents = [];
+          window.addEventListener("pagehide", e => {
+            window.actualBFCacheEvents.push({
+              name: "pagehide", persisted: e.persisted
+            });
+          });
+          window.addEventListener("pageshow", e => {
+            window.actualBFCacheEvents.push({
+              name: "pageshow", persisted: e.persisted
+            });
+          });
+
+          const old = OfflineLibrary.prototype.getBook;
+          window.pendingActualBFCacheRead = false;
+          window.actualBFCacheReadCount = 0;
+          OfflineLibrary.prototype.getBook = async function(id) {
+            const book = await old.call(this, id);
+            if (id !== "b-" + "4".repeat(24)) return book;
+            window.actualBFCacheReadCount++;
+            if (window.actualBFCacheReadCount !== 1) return book;
+            window.pendingActualBFCacheRead = true;
+            return new Promise(resolve => {
+              window.releaseActualBFCacheRead = () => resolve(book);
+            });
+          };
+        }""")
+        original_token = reader.evaluate("window.actualBFCacheToken")
+        reader.locator("#refreshOfflineBooks").click()
+        reader.wait_for_function("""() =>
+          document.querySelectorAll(".offline-book-row").length === 2""")
+        reader.locator(".offline-book-row").filter(
+            has_text="真实缓存未完成打开"
+        ).get_by_role("button", name="打开阅读").click()
+        reader.wait_for_function("window.pendingActualBFCacheRead === true")
+
+        reader.goto(origin + "/?bfcache-away=pending", wait_until="load")
+        manager.evaluate("""async () => {
+          const { OfflineLibrary } = await import("/reader-assets/js/offline.js");
+          await new OfflineLibrary().removeBook("b-" + "4".repeat(24));
+        }""")
+        reader.go_back(wait_until="commit")
+        state = reader.evaluate("""() => ({
+          token: window.actualBFCacheToken || null,
+          events: window.actualBFCacheEvents || [],
+          notRestored: performance.getEntriesByType("navigation")[0]
+            ?.notRestoredReasons || null
+        })""")
+        assert state["token"] == original_token and any(
+            event["name"] == "pageshow" and event["persisted"]
+            for event in state["events"]
+        ), "Real BFCache restore required, not reload: " + repr(state)
+        reader.wait_for_function("window.actualBFCacheReadCount >= 2")
+        reader.evaluate("window.releaseActualBFCacheRead()")
+        reader.wait_for_function("""() => document.querySelector("#start").disabled
+          && !document.querySelector("#source").textContent.includes(
+            "真实缓存未完成打开")""")
+        reader.wait_for_function("""() =>
+          document.querySelectorAll(".offline-book-row").length === 1""")
+        assert "真实缓存未完成打开" not in reader.locator("#documentBody").inner_text()
+
+        # The next real BFCache restoration must also reconcile an already
+        # open book deleted while its observer was suspended by pagehide.
+        reader.locator(".offline-book-row").filter(
+            has_text="真实缓存已打开书籍"
+        ).get_by_role("button", name="打开阅读").click()
+        reader.wait_for_function("""() => document.querySelector("#source")
+          .textContent.includes("真实缓存已打开书籍")
+          && !document.querySelector("#start").disabled""")
+        reader.goto(origin + "/?bfcache-away=active", wait_until="load")
+        manager.evaluate("""async () => {
+          const { OfflineLibrary } = await import("/reader-assets/js/offline.js");
+          await new OfflineLibrary().removeBook("b-" + "5".repeat(24));
+        }""")
+        reader.go_back(wait_until="commit")
+        reader.wait_for_function("""() => {
+          const events = window.actualBFCacheEvents;
+          return events && events.filter(e =>
+            e.name === "pageshow" && e.persisted).length >= 2;
+        }""", timeout=10000)
+        reader.wait_for_function("""() =>
+          document.querySelector("#status").textContent.includes("另一个标签页删除")
+          && document.querySelector("#start").disabled
+          && document.querySelector("#source").textContent.includes("未加载")""",
+          timeout=10000)
+        reader.get_by_text("暂无本机离线书籍", exact=False).wait_for()
+        assert not errors, "Real BFCache Reader lifecycle errors: " + repr(errors)
+    finally:
+        context.close()
+        browser.close()
+
+
 def main():
     # Keep the optional Playwright dependency out of the default pytest collection.
     from playwright.sync_api import sync_playwright
@@ -1407,6 +1576,7 @@ def main():
                 check_quota_estimate_is_advisory_and_recovery_is_actionable(browser, origin)
             finally:
                 browser.close()
+            check_real_bfcache_navigation_and_offline_deletion(playwright, origin)
     finally:
         server.shutdown()
         server.server_close()
